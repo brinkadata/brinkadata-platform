@@ -5,7 +5,7 @@ services:
   # Backend API (FastAPI)
   - type: web
     name: brinkadata-backend
-    runtime: python3
+    runtime: python
     plan: starter  # Change to 'standard' or 'pro' for production
     region: oregon  # Choose your preferred region
     buildCommand: pip install -r requirements.txt
@@ -34,7 +34,7 @@ services:
   # Frontend (Streamlit)
   - type: web
     name: brinkadata-frontend
-    runtime: python3
+    runtime: python
     plan: starter  # Change to 'standard' or 'pro' for production
     region: oregon  # Choose your preferred region
     buildCommand: pip install -r requirements.txt
