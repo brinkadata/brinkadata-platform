@@ -50,7 +50,7 @@ databases:
   # Managed PostgreSQL database
   - name: brinkadata-db
     databaseName: brinkadata
-    plan: starter  # Change to 'standard' or 'pro' for production
+    plan: basic-256mb  # Change to 'standard' or 'pro' for production
     region: oregon  # Must match service region for best performance
     postgresMajorVersion: 15
 
