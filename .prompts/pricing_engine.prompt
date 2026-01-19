@@ -1,0 +1,50 @@
+# Brinkadata - Pricing & Subscription Engine Design Prompt
+# Use this prompt to design Layer 2: Pricing & Subscription Engine
+
+## Objective
+Support paid plans without changing core analyzer. Enable monetization.
+
+## Requirements
+- **Plans**: Free, Pro, Team, Enterprise
+- **Limits per Plan**:
+  - Max saved deals, presets, projects
+  - Module access (Property only vs all)
+  - Features: IRR/NPV, exports, presets, scenario saving, API
+- **Feature Flags**: Configurable per plan (can_export_csv, can_use_irr, max_saved_deals)
+- **Billing**: Stripe integration (later) for subscriptions, coupons
+- **UI**: Usage limits display, soft upsells
+
+## Implementation Steps
+1. **Backend Models**:
+   - Plan: id, name, stripe_id, features (dict), limits (dict), price
+   - Subscription: id, account_id, plan_id, status, current_period_end
+
+2. **Feature Checks**:
+   - Helper: require_feature("can_export_csv") - raises exception if not allowed
+   - Usage tracking: count saved deals per account
+
+3. **API Endpoints**:
+   - GET /account/plan - current plan details
+   - POST /billing/upgrade - change plan (integrate Stripe)
+   - GET /account/usage - current usage vs limits
+
+4. **Frontend**:
+   - Plan comparison page
+   - Usage warnings: "7/20 deals used"
+   - Upgrade prompts in UI
+
+5. **Integration**:
+   - Start with hardcoded plans
+   - Add Stripe webhooks for subscription updates
+   - Handle plan changes (upgrade/downgrade logic)
+
+## Code Snippets
+- Backend: Plan/Subscription models
+- Backend: Feature check decorators
+- Frontend: Plan selection UI
+- Stripe: Webhook handler (future)
+
+## Testing
+- Feature gating works
+- Usage limits enforced
+- Plan upgrades reflected in UI

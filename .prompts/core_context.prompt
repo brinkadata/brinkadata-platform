@@ -1,0 +1,49 @@
+# Brinkadata Platform - Core Project Context
+# This prompt file provides the foundational context for the Brinkadata SaaS platform.
+# Use this as the base for all development work in VS Code/Copilot Chat.
+
+## Project Overview
+Brinkadata is a SaaS platform for real estate property intelligence and portfolio management. It helps investors analyze rental and flip deals using metrics like NOI, ROI, DSCR, CoC, IRR/NPV, and provides AI-enhanced insights.
+
+## Current Architecture
+- **Frontend**: Streamlit app (`frontend/app.py`) - Property analyzer UI with portfolio management
+- **Backend**: FastAPI with SQLite (`backend/main.py`) - Analysis endpoints, data persistence
+- **Domains**: Modular structure under `domains/` (property models/services)
+- **Data**: JSON/CSV for deals, SQLite for persistence
+
+## Key Features (Current)
+- Property analysis calculator (NOI, ROI, DSCR, CoC, IRR/NPV, flip metrics)
+- Scenario comparison (A/B/C)
+- Portfolio management (save/load deals, trash/restore)
+- Presets and market context (ZIP-based)
+- CSV exports
+
+## Roadmap Layers (SaaS Evolution)
+1. **Platform Foundation** (Current): Codebase layout, environments, shared concepts
+2. **Identity & Account Management** (Next Priority): User accounts, roles, permissions, data isolation
+3. **Pricing & Subscription Engine**: Plans (Free/Pro/Team), feature flags, billing integration
+4. **Affiliate & Partner Accounts**: Referral tracking, commissions, affiliate console
+5. **Product Modules**: Property Intelligence (current), Project Intelligence, Operations Intelligence, Search Intelligence
+6. **Admin & Ops Console**: Account admin, access management, affiliate/pricing admin
+
+## Development Guidelines
+- Use Pydantic for data models
+- FastAPI for backend APIs
+- Streamlit for frontend UI
+- SQLite for data (migrate to PostgreSQL later for multi-tenancy)
+- JWT/session auth for security
+- Feature flags for plan-based access
+- Account-scoped data (deals, projects belong to accounts)
+
+## Coding Standards
+- Type hints everywhere
+- Docstrings for classes/functions
+- Modular imports
+- Error handling with HTTPExceptions
+- Session state management in Streamlit
+
+## Next Steps
+- Implement Layer 1: Account model in backend
+- Add minimal auth awareness to frontend
+- Design User/Account/Role schemas
+- Tag existing data with account_id/user_id

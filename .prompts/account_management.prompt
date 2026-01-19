@@ -1,0 +1,55 @@
+# Brinkadata - Account Management Design Prompt
+# Use this prompt to design and implement Layer 1: Identity & Account Management
+
+## Objective
+Transition from single anonymous user to real accounts and (later) teams. Enable SaaS features like pricing and affiliates.
+
+## Requirements
+- **User Accounts**: Email + password login (v1), later SSO
+- **Account/Tenant Model**: Each user belongs to an Account (Personal or Team)
+- **Roles & Permissions**:
+  - owner: billing + full admin
+  - admin: manage members, presets, global thresholds
+  - member: full product, no billing/account edits
+  - read_only: view dashboards & exports, no changes
+  - affiliate: special role for referral tracking
+- **Security**: JWT auth, per-account data isolation
+- **Data Migration**: Tag existing saved deals/projects with account_id and user_id
+
+## Implementation Steps
+1. **Backend Models** (Pydantic + SQLAlchemy/SQLite schemas):
+   - User: id, email, password_hash, account_id, role, created_at
+   - Account: id, name, plan, created_at
+   - Plan: id, name, features (JSON), limits (JSON)
+   - Affiliate: id, user_id, referral_code, commission_rate
+
+2. **API Endpoints**:
+   - POST /auth/login - authenticate user
+   - POST /auth/register - create account/user
+   - GET /account/users - list account members (admin+)
+   - POST /account/invite - invite new user (admin+)
+   - GET /property/saved - filter by account_id
+   - POST /property/save - include account_id/user_id
+
+3. **Frontend Changes**:
+   - Login/register page before main app
+   - Show "Signed in as [User]" in sidebar
+   - "Account" menu for admin functions
+   - Role-based UI (hide features for read_only)
+
+4. **Migration**:
+   - Create default Account/User for existing data
+   - Update DB schema with account_id/user_id columns
+   - Mock login for development (hardcode user until real auth)
+
+## Code Snippets to Generate
+- Backend: User/Account models in `backend/models.py`
+- Backend: Auth endpoints in `backend/auth.py`
+- Frontend: Auth components in `frontend/auth.py`
+- DB: Migration script `backend/migrate_accounts.py`
+
+## Testing
+- Create test account/user
+- Save/load deals with account scoping
+- Role-based access control
+- Data isolation between accounts

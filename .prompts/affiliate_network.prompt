@@ -1,0 +1,46 @@
+# Brinkadata - Affiliate & Partner Accounts Design Prompt
+# Use this prompt to design Layer 3: Affiliate & Partner Accounts
+
+## Objective
+Allow partners to refer users and track performance/commission.
+
+## Requirements
+- **Affiliate Accounts**: Special role on affiliate accounts
+- **Referral Tracking**: Codes, links (?ref=code), attribution
+- **Commission**: Percentage/fixed, payout tracking
+- **Affiliate Console**: Dashboard for referred users, subscriptions, commissions
+- **Access Control**: Affiliates see aggregate stats only, no deal data
+
+## Implementation Steps
+1. **Backend Models**:
+   - Affiliate: id, user_id, referral_code, commission_rate, total_earned
+   - Referral: id, affiliate_id, referred_user_id, event (signup/upgrade), amount, created_at
+
+2. **Attribution Logic**:
+   - Signup with ?ref=code links referred user to affiliate
+   - Track events: account created, plan upgrades
+   - Calculate commissions on revenue
+
+3. **API Endpoints**:
+   - GET /affiliate/dashboard - stats for affiliate
+   - POST /affiliate/referral - create referral link
+   - GET /admin/affiliates - admin view (owners)
+
+4. **Frontend**:
+   - Affiliate signup/invite
+   - Affiliate dashboard (referred users, earnings)
+   - Referral links generator
+
+5. **Security**:
+   - Affiliates can't access deal data
+   - Aggregate-only reporting
+
+## Code Snippets
+- Backend: Affiliate/Referral models
+- Backend: Attribution middleware
+- Frontend: Affiliate UI components
+
+## Testing
+- Referral attribution works
+- Commission calculation accurate
+- Access restrictions enforced
