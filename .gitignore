@@ -1,4 +1,6 @@
+# ======================
 # Python
+# ======================
 __pycache__/
 *.py[cod]
 *$py.class
@@ -23,43 +25,63 @@ wheels/
 .installed.cfg
 *.egg
 
-# Database
+# ======================
+# Databases
+# ======================
 *.db
 *.sqlite
 *.sqlite3
 brinkadata.db
 
-# Environment
+# ======================
+# Environment variables
+# ======================
 .env
-.env.local
-.env.production
+.env.*
+!.env.example
 
-# IDE
+# ======================
+# IDE / Editor
+# ======================
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
+# ======================
 # OS
+# ======================
 .DS_Store
 Thumbs.db
 
+# ======================
 # Logs
+# ======================
 *.log
 logs/
 
+# ======================
 # Streamlit
+# ======================
 .streamlit/secrets.toml
 
-# Temp files
+# ======================
+# Runtime / Temp Artifacts
+# ======================
+*.pid
+backend_pid.txt
 *.tmp
 *.bak
+
+# ======================
+# Application runtime data
+# ======================
+backend/data/
 saved_deals.json
 
-# Runtime data
-backend/data/
-
-# Screenshots (temp/local)
+# ======================
+# Screenshots (local only)
+# ======================
 IMG_*.PNG
 IMG_*.png
