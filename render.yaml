@@ -29,7 +29,7 @@ services:
         value: 7
       - key: RESUME_CODE_MINUTES
         value: 10
-    healthCheckPath: /
+    healthCheckPath: /health
 
   # Frontend (Streamlit)
   - type: web

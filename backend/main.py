@@ -877,6 +877,11 @@ class ScenarioClearRequest(BaseModel):
 # ---------------------------------------------------------
 # Routes
 # ---------------------------------------------------------
+@app.get("/")
+def root() -> Dict[str, str]:
+    return {"status": "ok"}
+
+
 @app.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
