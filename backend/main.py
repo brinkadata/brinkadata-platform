@@ -887,6 +887,20 @@ def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/version")
+def version() -> Dict[str, str]:
+    """
+    Safe version endpoint - returns commit SHA if available via env var.
+    Does NOT expose secrets. Returns minimal info if env var missing.
+    """
+    import os
+    commit = os.getenv("RENDER_GIT_COMMIT", "")[:7] if os.getenv("RENDER_GIT_COMMIT") else None
+    result = {"status": "ok"}
+    if commit:
+        result["commit"] = commit
+    return result
+
+
 # Auth endpoints
 @app.post("/auth/register", response_model=TokenResponse)
 def register(req: RegisterRequest):
