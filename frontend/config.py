@@ -4,19 +4,93 @@
 import os
 from typing import Literal
 
-# Environment detection
-ENV: Literal["dev", "staging", "prod"] = os.environ.get("ENV", "dev")  # type: ignore
-IS_DEV = (ENV == "dev")
+# Environment detection - default to "production" on Render to prevent localhost fallback
+ENV: Literal["local", "staging", "production"] = os.environ.get("ENV", "production")  # type: ignore
+IS_DEV = (ENV == "local")
 IS_STAGING = (ENV == "staging")
-IS_PROD = (ENV == "prod")
+IS_PROD = (ENV == "production")
 
-# Backend API URL
-if IS_PROD:
-    BACKEND_URL = os.environ.get("BACKEND_URL", "https://api.brinkadata.com")
-elif IS_STAGING:
-    BACKEND_URL = os.environ.get("BACKEND_URL", "https://api-staging.brinkadata.com")
-else:  # dev
-    BACKEND_URL = os.environ.get("BACKEND_URL", "http://127.0.0.1:8000")
+
+def get_env() -> Literal["local", "staging", "production"]:
+    """
+    Get current environment with normalization.
+    
+    Returns:
+        "local", "staging", or "production" (default on Render)
+    """
+    return ENV
+
+
+def validate_api_url(url: str, env: str) -> None:
+    """
+    Validate API base URL according to environment security rules.
+    
+    Args:
+        url: The API base URL to validate
+        env: Current environment ("local", "staging", "production")
+    
+    Raises:
+        ValueError: If URL violates security constraints for the environment
+    """
+    if not url:
+        raise ValueError("API base URL cannot be empty")
+    
+    # Production/staging must use HTTPS and never localhost
+    if env in ("staging", "production"):
+        if not url.startswith("https://"):
+            raise ValueError(f"Production/staging must use HTTPS. Got: {url}")
+        if "127.0.0.1" in url or "localhost" in url:
+            raise ValueError(f"Production/staging cannot use localhost URLs. Got: {url}")
+
+
+def get_api_base_url() -> str:
+    """
+    Get API base URL with strict priority and validation.
+    
+    Priority:
+    1. BACKEND_URL environment variable
+    2. API_BASE_URL environment variable  
+    3. Local dev default (http://127.0.0.1:8000) ONLY if ENV == "local"
+    4. Raise error if production/staging with no configured URL
+    
+    Returns:
+        Validated API base URL with trailing slash removed
+    
+    Raises:
+        RuntimeError: If production/staging environment has no configured URL
+    """
+    # Priority 1: BACKEND_URL (primary)
+    backend_url = os.environ.get("BACKEND_URL")
+    if backend_url:
+        url = backend_url.rstrip("/")
+        validate_api_url(url, ENV)
+        return url
+    
+    # Priority 2: API_BASE_URL (legacy support)
+    api_base_url = os.environ.get("API_BASE_URL")
+    if api_base_url:
+        url = api_base_url.rstrip("/")
+        validate_api_url(url, ENV)
+        return url
+    
+    # Priority 3: Local dev default
+    if ENV == "local":
+        return "http://127.0.0.1:8000"
+    
+    # Priority 4: Error for production/staging without config
+    raise RuntimeError(
+        f"Backend URL not configured for {ENV} environment. "
+        f"Please set BACKEND_URL or API_BASE_URL environment variable."
+    )
+
+
+# Initialize BACKEND_URL for backwards compatibility
+try:
+    BACKEND_URL = get_api_base_url()
+except RuntimeError as e:
+    # In production, this should never happen - fail fast
+    print(f"[CONFIG] CRITICAL: {e}")
+    BACKEND_URL = ""  # Will cause errors on API calls, which is correct behavior
 
 # Token lifetimes (for display only; backend enforces)
 ACCESS_TOKEN_MINUTES = int(os.environ.get("ACCESS_TOKEN_MINUTES", "15"))

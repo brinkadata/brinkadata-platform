@@ -17,9 +17,29 @@ import streamlit as st
 
 # Import environment config (robust fallback for different run contexts)
 try:
-    from frontend.config import BACKEND_URL, IS_DEV, ENABLE_DEBUG_UI, RESUME_CODE_MINUTES
+    from frontend.config import BACKEND_URL, IS_DEV, ENABLE_DEBUG_UI, RESUME_CODE_MINUTES, get_api_base_url
 except ModuleNotFoundError:
-    from config import BACKEND_URL, IS_DEV, ENABLE_DEBUG_UI, RESUME_CODE_MINUTES
+    from config import BACKEND_URL, IS_DEV, ENABLE_DEBUG_UI, RESUME_CODE_MINUTES, get_api_base_url
+
+# Import centralized auth state management
+try:
+    from frontend.auth import (
+        init_auth_state, set_auth, clear_auth, is_authenticated,
+        get_auth_header, require_auth, get_current_user,
+        get_account_id, get_role, get_plan
+    )
+except ModuleNotFoundError:
+    from auth import (
+        init_auth_state, set_auth, clear_auth, is_authenticated,
+        get_auth_header, require_auth, get_current_user,
+        get_account_id, get_role, get_plan
+    )
+
+# Import centralized API client
+try:
+    from frontend.api_client import api_request
+except ModuleNotFoundError:
+    from api_client import api_request
 
 # Import DEV-only observability tools
 if IS_DEV:
@@ -161,16 +181,10 @@ PORTFOLIO_RECOVERY_MAX_ATTEMPTS = 10
 def init_state() -> None:
     ss = st.session_state
 
-    # Auth state
-    if "auth_token" not in ss:
-        ss["auth_token"] = None
-    if "current_user" not in ss:
-        ss["current_user"] = None
+    # Initialize auth state FIRST using centralized module
+    # This ensures auth keys are properly initialized on every rerun
+    init_auth_state()
     
-    # Session rehydration guard (prevent protected calls before auth is established)
-    if "session_rehydrated" not in ss:
-        ss["session_rehydrated"] = False
-
     # Navigation
     ss.setdefault("nav_page", "Analyzer")
 
@@ -728,17 +742,30 @@ def apply_pending_actions() -> bool:
         if IS_DEV:
             print("[DEFERRED] Backend recovery rerun")
     
-    # 1. Apply auth payload (from login/register/resume)
+    # 1. Apply auth payload (from login/register/resume OR token refresh)
     if ss.get("_apply_payload"):
         payload = ss.pop("_apply_payload")  # Pop to consume it
-        if "auth_token" in payload:
-            ss["auth_token"] = payload["auth_token"]
-        if "current_user" in payload:
-            ss["current_user"] = payload["current_user"]
-        if "session_id" in payload:
-            ss["session_id"] = payload["session_id"]
-        if "refresh_token" in payload:
-            ss["refresh_token"] = payload["refresh_token"]
+        
+        # Check if this is an auth operation (has all required auth fields)
+        if all(k in payload for k in ["auth_token", "current_user", "session_id", "refresh_token"]):
+            # Use centralized set_auth to ensure proper state management
+            set_auth(
+                payload["auth_token"],
+                payload["current_user"],
+                payload["session_id"],
+                payload["refresh_token"]
+            )
+        else:
+            # Partial update (e.g., logout/clear) - apply individual keys
+            if "auth_token" in payload:
+                ss["auth_token"] = payload["auth_token"]
+            if "current_user" in payload:
+                ss["current_user"] = payload["current_user"]
+            if "session_id" in payload:
+                ss["session_id"] = payload["session_id"]
+            if "refresh_token" in payload:
+                ss["refresh_token"] = payload["refresh_token"]
+        
         applied_any = True
         applied_keys.append("_apply_payload")
         if IS_DEV:
@@ -840,8 +867,12 @@ def is_protected_path(path: str) -> bool:
 
 
 def is_logged_in() -> bool:
-    """Check if user is authenticated."""
-    return bool(st.session_state.get("auth_token"))
+    """Check if user is authenticated.
+    
+    DEPRECATED: Use is_authenticated() from frontend.auth instead.
+    Kept for backward compatibility with existing code.
+    """
+    return is_authenticated()
 
 
 def call_backend(
@@ -855,103 +886,44 @@ def call_backend(
 ) -> Optional[requests.Response]:
     """Call backend API with automatic JWT token attachment and refresh on 401.
     
+    DEPRECATED: This function is now a wrapper around api_client.api_request().
+    New code should use api_request() directly from frontend.api_client.
+    Kept for backward compatibility with existing code.
+    
     Args:
         method: HTTP method (GET, POST, etc.)
         path: API path (e.g., '/property/analyze')
         json_body: JSON body for POST requests
-        headers: Optional additional headers (merged with auth headers)
+        headers: Optional additional headers (will be merged with auth headers by api_client)
         timeout: Request timeout in seconds
         _retry: Internal flag to prevent infinite retry loops
         
     Returns:
         Response object or None on error
     """
-    url = f"{BACKEND_URL}{path}"
+    # Convert to api_request signature
+    # Note: headers parameter not yet supported in api_request, but auth is automatic
+    if headers:
+        # Log warning if custom headers provided (not yet supported)
+        if IS_DEV:
+            print(f"[DEPRECATED] call_backend with custom headers not fully supported yet: {headers}")
     
-    # Start with caller-provided headers or empty dict
-    merged_headers = dict(headers) if headers else {}
+    # Map method strings to api_request format
+    method_upper = method.upper()
+    if method_upper not in ("GET", "POST", "PUT", "DELETE"):
+        if IS_DEV:
+            print(f"[API] Unsupported method {method}, defaulting to GET")
+        method_upper = "GET"
     
-    # Add Content-Type for JSON requests
-    if json_body is not None:
-        merged_headers.setdefault("Content-Type", "application/json")
-    
-    # Attach JWT token for protected endpoints
-    if is_protected_path(path):
-        token = st.session_state.get("auth_token")
-        if token:
-            merged_headers.setdefault("Authorization", f"Bearer {token}")
-    
-    try:
-        if method == "GET":
-            resp = requests.get(url, headers=merged_headers, timeout=timeout)
-        elif method == "POST":
-            resp = requests.post(url, json=json_body, headers=merged_headers, timeout=timeout)
-        else:
-            raise ValueError(f"Unsupported method: {method}")
-        
-        # Handle 401 with automatic token refresh (if session exists)
-        if resp.status_code == 401 and _retry and is_protected_path(path):
-            session_id = st.session_state.get("session_id")
-            refresh_token = st.session_state.get("refresh_token")
-            
-            if session_id and refresh_token:
-                # Attempt token refresh
-                refresh_resp = requests.post(
-                    f"{BACKEND_URL}/auth/refresh",
-                    json={"session_id": session_id, "refresh_token": refresh_token},
-                    timeout=10
-                )
-                
-                if refresh_resp.status_code == 200:
-                    refresh_data = refresh_resp.json()
-                    new_token = refresh_data.get("access_token")
-                    new_refresh = refresh_data.get("refresh_token")
-                    user_data = refresh_data.get("user", {})
-                    
-                    if new_token and new_refresh:
-                        # Update session state via apply pattern
-                        st.session_state["_apply_payload"] = {
-                            "auth_token": new_token,
-                            "refresh_token": new_refresh,
-                            "session_id": session_id,
-                            "current_user": user_data,
-                            "nav_page": st.session_state.get("nav_page", "Analyzer")
-                        }
-                        if IS_DEV and 'mark_key_set' in globals():
-                            mark_key_set(st.session_state, "_apply_payload", "token_refresh")
-                        # Retry original request with new token (once only)
-                        return call_backend(method, path, json_body=json_body, headers=headers, timeout=timeout, _retry=False)
-                else:
-                    # Refresh failed, force logout
-                    st.session_state["_apply_payload"] = {
-                        "auth_token": None,
-                        "current_user": None,
-                        "session_id": None,
-                        "refresh_token": None,
-                        "nav_page": "Login"
-                    }
-                    if IS_DEV and 'mark_key_set' in globals():
-                        mark_key_set(st.session_state, "_apply_payload", "token_refresh_failed")
-                    st.rerun()
-        
-        return resp
-    except Exception as e:
-        # Backend unreachable - update status
-        import time
-        ss = st.session_state
-        
-        # Throttle error messages (don't spam)
-        last_error_time = ss.get("_backend_last_error_time", 0.0)
-        now = time.time()
-        
-        if now - last_error_time > 5.0:  # Show error max once per 5 seconds
-            ss["_backend_last_error_time"] = now
-            ss["_backend_status"] = "unreachable"
-            
-            # Show friendly error banner (only once per 5 seconds)
-            st.error(f"⚠️ Cannot reach backend. Please ensure the backend is running at {BACKEND_URL}")
-        
-        return None
+    # Delegate to api_client.api_request
+    return api_request(
+        method_upper,  # type: ignore
+        path,
+        json=json_body,
+        params=None,
+        timeout=timeout,
+        _retry=_retry
+    )
 
 
 def call_backend_tracked(
@@ -965,7 +937,10 @@ def call_backend_tracked(
     expects_auth: bool = False
 ) -> Optional[requests.Response]:
     """
-    Wrapper for call_backend with API health tracking and throttled error logging.
+    Wrapper for api_request with API health tracking and throttled error logging.
+    
+    DEPRECATED: New code should use api_request() directly from frontend.api_client.
+    Kept for backward compatibility with existing health tracking code.
     
     Args:
         method: HTTP method (GET, POST, etc.)
@@ -987,48 +962,32 @@ def call_backend_tracked(
         _api_health_set(ss, endpoint, "not_authenticated", err="No auth token")
         return None
     
-    try:
-        resp = call_backend(method, path, json_body=json_body, headers=headers, timeout=timeout)
+    # Delegate to call_backend (which now delegates to api_request)
+    resp = call_backend(method, path, json_body=json_body, headers=headers, timeout=timeout)
+    
+    # Update health tracking based on response
+    if resp is None:
+        _api_health_set(ss, endpoint, "no_response", err="No response from backend")
+        _api_log_throttled(endpoint, "No response from backend")
+        mark_backend_unreachable("No response from backend")
+        return None
+    
+    if resp.status_code >= 200 and resp.status_code < 300:
+        _api_health_set(ss, endpoint, "ok", http_status=resp.status_code)
         
-        if resp is None:
-            _api_health_set(ss, endpoint, "no_response", err="No response from backend")
-            _api_log_throttled(endpoint, "No response from backend")
-            mark_backend_unreachable("No response from backend")
-            return None
+        # Check if backend was previously down - show reconnection message
+        if ss.get("_backend_was_down"):
+            st.success("✅ Backend reconnected!")
         
-        if resp.status_code >= 200 and resp.status_code < 300:
-            _api_health_set(ss, endpoint, "ok", http_status=resp.status_code)
-            
-            # Check if backend was previously down - show reconnection message
-            if ss.get("_backend_was_down"):
-                st.success("✅ Backend reconnected!")
-            
-            # Mark backend as connected (clears all error states)
-            mark_backend_connected()
-            return resp
-        else:
-            # Non-success status
-            error_msg = f"HTTP {resp.status_code}"
-            _api_health_set(ss, endpoint, "error", http_status=resp.status_code, err=error_msg)
-            _api_log_throttled(endpoint, error_msg)
-            return resp
-            
-    except requests.exceptions.Timeout:
-        _api_health_set(ss, endpoint, "no_response", err="Timeout")
-        _api_log_throttled(endpoint, "Request timeout")
-        mark_backend_unreachable("Timeout")
-        return None
-    except requests.exceptions.ConnectionError as e:
-        _api_health_set(ss, endpoint, "no_response", err="Connection failed")
-        _api_log_throttled(endpoint, "Connection error")
-        mark_backend_unreachable(f"Connection error: {str(e)[:50]}")
-        return None
-    except Exception as e:
-        error_msg = str(e)[:50]
-        _api_health_set(ss, endpoint, "error", err=error_msg)
-        _api_log_throttled(endpoint, f"Error: {error_msg}")
-        mark_backend_unreachable(error_msg)
-        return None
+        # Mark backend as connected (clears all error states)
+        mark_backend_connected()
+        return resp
+    else:
+        # Non-success status
+        error_msg = f"HTTP {resp.status_code}"
+        _api_health_set(ss, endpoint, "error", http_status=resp.status_code, err=error_msg)
+        _api_log_throttled(endpoint, error_msg)
+        return resp
 
 
 # --------------------------------------------------------------------
@@ -1257,16 +1216,49 @@ def render_sidebar() -> None:
                     except Exception:
                         pass  # Continue logout even if backend call fails
                 
-                # Clear session via apply pattern
-                ss["_apply_payload"] = {
-                    "auth_token": None,
-                    "current_user": None,
-                    "session_id": None,
-                    "refresh_token": None,
-                    "capabilities": None,  # Clear cached capabilities on logout
-                    "nav_page": "Login"
-                }
+                # Clear auth state using centralized helper
+                clear_auth()
+                
+                # Navigate to login page
+                ss["nav_page"] = "Login"
                 st.rerun()
+        
+        # Auth Smoke Test (visible when authenticated)
+        if auth_token:
+            st.markdown("---")
+            st.markdown("**🔬 Auth Smoke Test**")
+            st.caption("Test authentication status with protected endpoint")
+            
+            if st.button("🧪 Test Auth", key="auth_smoke_test_btn", use_container_width=True):
+                try:
+                    # Call a protected endpoint to verify auth is working
+                    resp = call_backend("GET", "/account/info", timeout=10)
+                    
+                    if resp and resp.status_code == 200:
+                        data = resp.json()
+                        st.success("✅ Auth working correctly!")
+                        st.caption(f"Account: {data.get('account_name', 'Unknown')}")
+                        st.caption(f"Plan: {data.get('plan', 'unknown')}")
+                    elif resp and resp.status_code == 401:
+                        st.error("❌ Auth token invalid or expired")
+                        st.caption("Try logging out and back in")
+                    elif resp and resp.status_code == 403:
+                        st.warning("⚠️ Authenticated but missing permissions")
+                    elif resp:
+                        st.error(f"❌ Error: HTTP {resp.status_code}")
+                    else:
+                        st.error("❌ Cannot connect to backend")
+                        
+                except Exception as e:
+                    st.error(f"❌ Error: {str(e)[:100]}")
+            
+            # Show current connection status
+            api_base = get_api_base_url()
+            st.caption(f"API: {api_base}")
+            if is_authenticated():
+                st.caption("✅ Token present")
+            else:
+                st.caption("❌ No auth token")
         
         # DEV Test Controls Panel (DEV-only, gated by IS_DEV or ENABLE_DEBUG_UI)
         if ENABLE_DEBUG_UI and auth_token:
@@ -1795,6 +1787,10 @@ def run_analysis(inputs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def render_analyzer() -> None:
+    # Auth guard - stop execution if not authenticated
+    if not require_auth(redirect_to_login=True):
+        return
+    
     # Note: Address payload is now handled centrally in apply_pending_actions()
     # at the top of main(), before any widgets are created. No guard needed here.
     render_header()
@@ -2304,6 +2300,10 @@ def load_scenarios(property_id: int) -> List[Dict[str, Any]]:
 
 
 def render_portfolio_and_trash() -> None:
+    # Auth guard - stop execution if not authenticated
+    if not require_auth(redirect_to_login=True):
+        return
+    
     st.header("Saved Deals — Portfolio")
     
     deals = load_saved_deals()
@@ -2739,6 +2739,10 @@ def render_portfolio_and_trash() -> None:
 
 
 def render_plans_billing() -> None:
+    # Auth guard - stop execution if not authenticated
+    if not require_auth(redirect_to_login=True):
+        return
+    
     st.header("Plans & Billing")
     
     # Current plan info
@@ -2957,25 +2961,20 @@ def render_login() -> None:
                 refresh_token = data.get("refresh_token")
                 
                 if token and session_id and refresh_token:
-                    # UX Fix Task 1: Post-login navigation using deferred pattern
-                    # DO NOT set nav_page directly here (widget already instantiated).
-                    # Set neutral flag → rerun → apply at top of main() before widgets.
-                    ss["_apply_payload"] = {
-                        "auth_token": token,
-                        "current_user": user,
-                        "session_id": session_id,
-                        "refresh_token": refresh_token,
-                    }
-                    ss["_post_login_nav"] = "Analyzer"  # Deferred navigation target
+                    # Use centralized auth setter
+                    set_auth(token, user, session_id, refresh_token)
+                    
+                    # Set deferred navigation to Analyzer
+                    ss["_post_login_nav"] = "Analyzer"
                     if IS_DEV and 'mark_key_set' in globals():
-                        mark_key_set(ss, "_apply_payload", "login_success")
                         mark_key_set(ss, "_post_login_nav", "login_success")
                         track_event(ss, "login_success", {"user": user.get("email", "unknown")})
                     set_debug_cause("login")
+                    
                     # Set flag to clear login form fields on next run (safe pattern)
                     ss["_clear_login_fields"] = True
+                    
                     # Fetch and cache capabilities after successful login
-                    # Note: Capabilities are fetched after login to enable accurate UI gating
                     fetch_and_cache_capabilities()
                     st.rerun()
                 else:
@@ -3025,21 +3024,19 @@ def render_login() -> None:
                     refresh_token = data.get("refresh_token")
                     
                     if token and session_id and refresh_token:
-                        # UX Fix Task 1: Post-registration navigation using deferred pattern
-                        ss["_apply_payload"] = {
-                            "auth_token": token,
-                            "current_user": user,
-                            "session_id": session_id,
-                            "refresh_token": refresh_token,
-                        }
-                        ss["_post_login_nav"] = "Analyzer"  # Deferred navigation target
+                        # Use centralized auth setter
+                        set_auth(token, user, session_id, refresh_token)
+                        
+                        # Set deferred navigation to Analyzer
+                        ss["_post_login_nav"] = "Analyzer"
                         if IS_DEV and 'mark_key_set' in globals():
-                            mark_key_set(ss, "_apply_payload", "register_success")
                             mark_key_set(ss, "_post_login_nav", "register_success")
                             track_event(ss, "register_success", {"user": user.get("email", "unknown")})
                         set_debug_cause("register")
+                        
                         # Set flag to clear register form fields on next run (safe pattern)
                         ss["_clear_register_fields"] = True
+                        
                         # Fetch and cache capabilities after successful auto-login
                         fetch_and_cache_capabilities()
                         st.rerun()
@@ -3086,26 +3083,21 @@ def render_login() -> None:
                 refresh_token = data.get("refresh_token")
                 
                 if token and session_id and refresh_token:
-                    # UX Fix: Post-resume navigation using same deferred pattern as login
-                    # DO NOT set nav_page directly (widget already instantiated).
-                    # Set neutral flag → rerun → apply at top of main() before widgets.
-                    ss["_apply_payload"] = {
-                        "auth_token": token,
-                        "current_user": user,
-                        "session_id": session_id,
-                        "refresh_token": refresh_token,
-                    }
-                    ss["_post_login_nav"] = "Analyzer"  # Shared deferred navigation (same as login)
+                    # Use centralized auth setter
+                    set_auth(token, user, session_id, refresh_token)
+                    
+                    # Set deferred navigation to Analyzer
+                    ss["_post_login_nav"] = "Analyzer"
                     if IS_DEV and 'mark_key_set' in globals():
-                        mark_key_set(ss, "_apply_payload", "resume_success")
                         mark_key_set(ss, "_post_login_nav", "resume_success")
                         track_event(ss, "resume_success", {"user": user.get("email", "unknown")})
                     set_debug_cause("resume")
+                    
                     # Set flag to clear resume form field on next run (safe pattern)
                     ss["_clear_resume_field"] = True
+                    
                     # Fetch and cache capabilities after successful resume
                     fetch_and_cache_capabilities()
-                    # No success message - navigation to Analyzer IS the success indicator
                     st.rerun()
                 else:
                     st.error("Resume failed: incomplete session data.")
@@ -3173,6 +3165,10 @@ def render_login() -> None:
 
 def render_property_search() -> None:
     """Render Property Search MVP page."""
+    # Auth guard - stop execution if not authenticated
+    if not require_auth(redirect_to_login=True):
+        return
+    
     ss = st.session_state
     
     st.markdown("## 🔍 Property Search")
@@ -3347,6 +3343,10 @@ def render_property_search() -> None:
 
 def render_assets() -> None:
     """Render Assets MVP page."""
+    # Auth guard - stop execution if not authenticated
+    if not require_auth(redirect_to_login=True):
+        return
+    
     ss = st.session_state
     
     # Deferred form clearing (before widgets are instantiated)
@@ -3601,6 +3601,15 @@ def render_assets() -> None:
 
 
 def main() -> None:
+    # ========================================================================
+    # AUTH STATE INITIALIZATION (CRITICAL - DO NOT REMOVE)
+    # ========================================================================
+    # Initialize auth state BEFORE any widgets or logic.
+    # This ensures auth keys persist across Streamlit reruns and page navigation.
+    # See frontend/auth.py for implementation details and root cause analysis.
+    # ========================================================================
+    init_auth_state()
+    
     # ========================================================================
     # CENTRALIZED DEFERRED ACTION HANDLER
     # ========================================================================
