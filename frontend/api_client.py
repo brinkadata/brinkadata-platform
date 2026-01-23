@@ -135,16 +135,26 @@ def api_request(
         # Handle 401 Unauthorized with automatic token refresh
         if resp.status_code == 401 and _retry and not is_public_endpoint(path):
             if IS_DEV:
-                print(f"[API] 401 on {path}, attempting token refresh...")
+                print(f"[API] ⚠️  401 on {path}, attempting token refresh...")
             
-            # Try to refresh token
-            if _try_refresh_token():
-                # Refresh succeeded - retry original request ONCE
-                return api_request(method, path, json=json, params=params, timeout=timeout, _retry=False)
+            # Only attempt refresh if we actually have refresh credentials
+            if st.session_state.get("refresh_token") and st.session_state.get("session_id"):
+                # Try to refresh token
+                if _try_refresh_token():
+                    # Refresh succeeded - retry original request ONCE
+                    if IS_DEV:
+                        print(f"[API] 🔄 Retrying {path} with refreshed token...")
+                    return api_request(method, path, json=json, params=params, timeout=timeout, _retry=False)
+                else:
+                    # Refresh failed - session is truly expired
+                    if IS_DEV:
+                        print("[API] ❌ Token refresh failed, session expired")
+                    _handle_session_expired()
+                    return None
             else:
-                # Refresh failed - force logout
+                # No refresh token available - session is invalid
                 if IS_DEV:
-                    print("[API] Token refresh failed, forcing logout")
+                    print("[API] ❌ No refresh token available, session invalid")
                 _handle_session_expired()
                 return None
         
@@ -208,9 +218,6 @@ def _try_refresh_token() -> bool:
         return False
     
     try:
-        # Use get_api_base_url from config (handles all validation)
-        from frontend.config import get_api_base_url
-        
         base_url = get_api_base_url()
         resp = requests.post(
             f"{base_url}/auth/refresh",
@@ -224,26 +231,39 @@ def _try_refresh_token() -> bool:
             new_refresh = data.get("refresh_token")
             user_data = data.get("user", {})
             
-            if new_token and new_refresh:
-                # Update tokens in session state
+            if new_token:
+                # Update access token in session state
                 ss["auth_token"] = new_token
-                ss["refresh_token"] = new_refresh
-                # Keep existing session_id and current_user unless backend provides new ones
+                
+                # Update refresh token if provided (rotation)
+                if new_refresh:
+                    ss["refresh_token"] = new_refresh
+                
+                # Update user data if provided
                 if user_data:
                     ss["current_user"] = user_data
+                    # Update canonical keys for convenience
+                    ss["account_id"] = user_data.get("account_id")
+                    ss["role"] = user_data.get("role")
+                
+                # Keep is_authenticated flag true
+                ss["is_authenticated"] = True
                 
                 if IS_DEV:
-                    print("[API] Token refresh successful")
+                    print("[API] ✅ Token refresh successful")
                 return True
+            else:
+                if IS_DEV:
+                    print("[API] ❌ Token refresh response missing access_token")
         
         if IS_DEV:
-            print(f"[API] Token refresh failed: HTTP {resp.status_code}")
+            print(f"[API] ❌ Token refresh failed: HTTP {resp.status_code}")
         return False
         
     except Exception as e:
         if IS_DEV:
             # Never log the actual exception which might contain tokens
-            print(f"[API] Token refresh error: {type(e).__name__}")
+            print(f"[API] ❌ Token refresh error: {type(e).__name__}")
         return False
 
 

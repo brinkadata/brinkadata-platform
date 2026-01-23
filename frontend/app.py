@@ -17,9 +17,9 @@ import streamlit as st
 
 # Import environment config (robust fallback for different run contexts)
 try:
-    from frontend.config import BACKEND_URL, IS_DEV, ENABLE_DEBUG_UI, RESUME_CODE_MINUTES, get_api_base_url
+    from frontend.config import BACKEND_URL, IS_DEV, ENABLE_DEBUG_UI, RESUME_CODE_MINUTES, get_api_base_url, ENV, IS_LOCAL
 except ModuleNotFoundError:
-    from config import BACKEND_URL, IS_DEV, ENABLE_DEBUG_UI, RESUME_CODE_MINUTES, get_api_base_url
+    from config import BACKEND_URL, IS_DEV, ENABLE_DEBUG_UI, RESUME_CODE_MINUTES, get_api_base_url, ENV, IS_LOCAL
 
 # Import centralized auth state management
 try:
@@ -290,7 +290,7 @@ def ping_backend_if_needed() -> None:
         return
     
     # Make lightweight ping call using tracked wrapper (updates API health automatically)
-    _ = call_backend_tracked("GET", "/account/info", timeout=5, expects_auth=True)
+    _ = api_request("GET", "/account/info", timeout=5)
     # Status is now updated via call_backend_tracked
 
 def is_backend_unreachable() -> bool:
@@ -522,7 +522,7 @@ def fetch_and_cache_capabilities() -> bool:
         return False
     
     try:
-        resp = call_backend("GET", "/auth/capabilities", timeout=10)
+        resp = api_request("GET", "/auth/capabilities", timeout=10)
         if resp and resp.status_code == 200:
             data = resp.json()
             ss["capabilities"] = {
@@ -848,24 +848,6 @@ def safe_get(d: Dict[str, Any], key: str, default: Any = None) -> Any:
     return val
 
 
-def is_protected_path(path: str) -> bool:
-    """Check if endpoint requires authentication.
-    
-    Public endpoints (no Bearer token required):
-    - /auth/login
-    - /auth/register
-    - /auth/resume (uses resume_code instead)
-    
-    Protected endpoints (Bearer token required):
-    - /auth/resume/request
-    - /auth/logout
-    - /auth/refresh
-    - All other endpoints
-    """
-    public_paths = ["/auth/login", "/auth/register", "/auth/resume"]
-    return path not in public_paths
-
-
 def is_logged_in() -> bool:
     """Check if user is authenticated.
     
@@ -873,121 +855,6 @@ def is_logged_in() -> bool:
     Kept for backward compatibility with existing code.
     """
     return is_authenticated()
-
-
-def call_backend(
-    method: str, 
-    path: str, 
-    *, 
-    json_body: Optional[Dict[str, Any]] = None, 
-    headers: Optional[Dict[str, str]] = None,
-    timeout: int = 20,
-    _retry: bool = True
-) -> Optional[requests.Response]:
-    """Call backend API with automatic JWT token attachment and refresh on 401.
-    
-    DEPRECATED: This function is now a wrapper around api_client.api_request().
-    New code should use api_request() directly from frontend.api_client.
-    Kept for backward compatibility with existing code.
-    
-    Args:
-        method: HTTP method (GET, POST, etc.)
-        path: API path (e.g., '/property/analyze')
-        json_body: JSON body for POST requests
-        headers: Optional additional headers (will be merged with auth headers by api_client)
-        timeout: Request timeout in seconds
-        _retry: Internal flag to prevent infinite retry loops
-        
-    Returns:
-        Response object or None on error
-    """
-    # Convert to api_request signature
-    # Note: headers parameter not yet supported in api_request, but auth is automatic
-    if headers:
-        # Log warning if custom headers provided (not yet supported)
-        if IS_DEV:
-            print(f"[DEPRECATED] call_backend with custom headers not fully supported yet: {headers}")
-    
-    # Map method strings to api_request format
-    method_upper = method.upper()
-    if method_upper not in ("GET", "POST", "PUT", "DELETE"):
-        if IS_DEV:
-            print(f"[API] Unsupported method {method}, defaulting to GET")
-        method_upper = "GET"
-    
-    # Delegate to api_client.api_request
-    return api_request(
-        method_upper,  # type: ignore
-        path,
-        json=json_body,
-        params=None,
-        timeout=timeout,
-        _retry=_retry
-    )
-
-
-def call_backend_tracked(
-    method: str,
-    path: str,
-    *,
-    json_body: Optional[Dict[str, Any]] = None,
-    headers: Optional[Dict[str, str]] = None,
-    timeout: int = 20,
-    tracked_name: Optional[str] = None,
-    expects_auth: bool = False
-) -> Optional[requests.Response]:
-    """
-    Wrapper for api_request with API health tracking and throttled error logging.
-    
-    DEPRECATED: New code should use api_request() directly from frontend.api_client.
-    Kept for backward compatibility with existing health tracking code.
-    
-    Args:
-        method: HTTP method (GET, POST, etc.)
-        path: API path (e.g., '/account/info')
-        json_body: JSON body for POST requests
-        headers: Optional additional headers
-        timeout: Request timeout in seconds
-        tracked_name: Name for tracking (defaults to path)
-        expects_auth: If True, check auth before calling and set status if missing
-        
-    Returns:
-        Response object or None on error
-    """
-    ss = st.session_state
-    endpoint = tracked_name or path
-    
-    # Check authentication if required
-    if expects_auth and not ss.get("auth_token"):
-        _api_health_set(ss, endpoint, "not_authenticated", err="No auth token")
-        return None
-    
-    # Delegate to call_backend (which now delegates to api_request)
-    resp = call_backend(method, path, json_body=json_body, headers=headers, timeout=timeout)
-    
-    # Update health tracking based on response
-    if resp is None:
-        _api_health_set(ss, endpoint, "no_response", err="No response from backend")
-        _api_log_throttled(endpoint, "No response from backend")
-        mark_backend_unreachable("No response from backend")
-        return None
-    
-    if resp.status_code >= 200 and resp.status_code < 300:
-        _api_health_set(ss, endpoint, "ok", http_status=resp.status_code)
-        
-        # Check if backend was previously down - show reconnection message
-        if ss.get("_backend_was_down"):
-            st.success("✅ Backend reconnected!")
-        
-        # Mark backend as connected (clears all error states)
-        mark_backend_connected()
-        return resp
-    else:
-        # Non-success status
-        error_msg = f"HTTP {resp.status_code}"
-        _api_health_set(ss, endpoint, "error", http_status=resp.status_code, err=error_msg)
-        _api_log_throttled(endpoint, error_msg)
-        return resp
 
 
 # --------------------------------------------------------------------
@@ -1099,6 +966,47 @@ def render_sidebar() -> None:
         elif ss.get("_backend_status") == "ok":
             st.success("✅ Connected")
         # Don't show anything for "unknown" (initial state)
+        
+        # Auth Debug Section (always visible - production-safe)
+        st.markdown("---")
+        st.markdown("### 🔐 Auth Status")
+        
+        # Show configured API base URL
+        try:
+            api_base = get_api_base_url()
+            # Mask full URL in production - just show domain
+            if IS_LOCAL:
+                st.caption(f"**API:** {api_base}")
+            else:
+                # Show just the domain in production
+                from urllib.parse import urlparse
+                parsed = urlparse(api_base)
+                domain = parsed.netloc or parsed.path.split('/')[0]
+                st.caption(f"**API:** {domain}")
+            st.caption(f"**Environment:** {ENV}")
+        except Exception as e:
+            st.error(f"⚠️ API config error: {str(e)[:60]}")
+        
+        # Auth token presence (never show actual token)
+        has_token = bool(st.session_state.get("auth_token"))
+        if has_token:
+            st.caption("**Auth token:** ✅ Present")
+        else:
+            st.caption("**Auth token:** ❌ None")
+        
+        # Current user email (if authenticated)
+        current_user = st.session_state.get("current_user")
+        if current_user and isinstance(current_user, dict):
+            email = current_user.get("email", "Unknown")
+            # Mask email in production (show first 3 chars + domain)
+            if not IS_LOCAL and "@" in email:
+                parts = email.split("@")
+                masked = f"{parts[0][:3]}***@{parts[1]}"
+                st.caption(f"**User:** {masked}")
+            else:
+                st.caption(f"**User:** {email}")
+        else:
+            st.caption("**User:** Not logged in")
 
         # Account info
         st.markdown("### Account")
@@ -1131,7 +1039,7 @@ def render_sidebar() -> None:
         
         if auth_token and session_rehydrated:
             try:
-                resp = call_backend("GET", "/account/info", timeout=10)
+                resp = api_request("GET", "/account/info", timeout=10)
                 if resp and resp.status_code == 200:
                     account_data = resp.json()
                     usage = account_data.get("usage", {})
@@ -1162,7 +1070,7 @@ def render_sidebar() -> None:
             # After logout, the backend session is REVOKED and resume codes will fail (by design).
             if st.button("🔑 Get Resume Code", key="get_resume_code_btn", use_container_width=True):
                 try:
-                    resp = call_backend("POST", "/auth/resume/request", json_body={}, timeout=10)
+                    resp = api_request("POST", "/auth/resume/request", json={}, timeout=10)
                     if resp and resp.status_code == 200:
                         data = resp.json()
                         resume_code = data.get("resume_code")
@@ -1207,10 +1115,10 @@ def render_sidebar() -> None:
                 
                 if session_id and refresh_token:
                     try:
-                        call_backend(
+                        api_request(
                             "POST",
                             "/auth/logout",
-                            json_body={"session_id": session_id, "refresh_token": refresh_token},
+                            json={"session_id": session_id, "refresh_token": refresh_token},
                             timeout=5
                         )
                     except Exception:
@@ -1232,7 +1140,7 @@ def render_sidebar() -> None:
             if st.button("🧪 Test Auth", key="auth_smoke_test_btn", use_container_width=True):
                 try:
                     # Call a protected endpoint to verify auth is working
-                    resp = call_backend("GET", "/account/info", timeout=10)
+                    resp = api_request("GET", "/account/info", timeout=10)
                     
                     if resp and resp.status_code == 200:
                         data = resp.json()
@@ -1273,7 +1181,7 @@ def render_sidebar() -> None:
                 # Fetch if not cached or auth state changed
                 if not dev_context or ss.get("_dev_context_token") != auth_token:
                     try:
-                        resp = call_backend_tracked("GET", "/account/info", timeout=10, expects_auth=True)
+                        resp = api_request("GET", "/account/info", timeout=10)
                         if resp and resp.status_code == 200:
                             account_data = resp.json()
                             # Fetch user info from current_user in session (set during login)
@@ -1335,7 +1243,7 @@ def render_sidebar() -> None:
                     with col1:
                         if st.button("Apply Plan", key="dev_apply_plan_btn", use_container_width=True):
                             try:
-                                resp = call_backend(
+                                resp = api_request(
                                     "POST",
                                     f"/admin/set_plan?account_id={account_id}&plan={selected_plan}",
                                     timeout=10
@@ -1368,7 +1276,7 @@ def render_sidebar() -> None:
                     with col2:
                         if st.button("Apply Role", key="dev_apply_role_btn", use_container_width=True):
                             try:
-                                resp = call_backend(
+                                resp = api_request(
                                     "POST",
                                     f"/admin/set_role?user_id={user_id}&role={selected_role}",
                                     timeout=10
@@ -1774,10 +1682,10 @@ def handle_api_error(resp: requests.Response, operation: str = "operation") -> N
 
 
 def run_analysis(inputs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    if not st.session_state.get("auth_token"):
+    if not is_authenticated():
         st.error("Authentication required. Please log in to run analysis.")
         return None
-    resp = call_backend("POST", "/property/analyze", json_body=inputs, timeout=40)
+    resp = api_request("POST", "/property/analyze", json=inputs, timeout=40)
     if resp is None:
         return None
     if resp.status_code != 200:
@@ -1955,7 +1863,7 @@ def render_analysis_results(inputs: Dict[str, Any], result: Dict[str, Any]) -> N
         auth_token = st.session_state.get('auth_token')
         if auth_token:
             try:
-                resp = call_backend("GET", "/account/info", timeout=10)
+                resp = api_request("GET", "/account/info", timeout=10)
                 if resp and resp.status_code == 200:
                     account_data = resp.json()
                     plan = account_data.get("plan", "free")
@@ -1972,7 +1880,7 @@ def render_analysis_results(inputs: Dict[str, Any], result: Dict[str, Any]) -> N
                 st.info("**Pro Plan ($29.99/month):** Unlock IRR, NPV, and advanced metrics")
                 if st.button("Upgrade to Pro", key="upgrade_irr"):
                     try:
-                        upgrade_resp = call_backend("POST", "/account/upgrade", json_body={"new_plan": "pro"}, timeout=10)
+                        upgrade_resp = api_request("POST", "/account/upgrade", json={"new_plan": "pro"}, timeout=10)
                         if upgrade_resp and upgrade_resp.status_code == 200:
                             st.success("Upgraded to Pro plan! IRR now unlocked.")
                             # st.rerun()
@@ -1999,7 +1907,7 @@ def render_analysis_results(inputs: Dict[str, Any], result: Dict[str, Any]) -> N
     auth_token = st.session_state.get('auth_token')
     if auth_token:
         try:
-            resp = call_backend("GET", "/account/info", timeout=10)
+            resp = api_request("GET", "/account/info", timeout=10)
             if resp and resp.status_code == 200:
                 account_data = resp.json()
                 usage = account_data.get("usage", {})
@@ -2017,7 +1925,7 @@ def render_analysis_results(inputs: Dict[str, Any], result: Dict[str, Any]) -> N
             st.info("**Pro Plan ($29.99/month):** 50 saved deals, IRR/NPV, CSV export")
             if st.button("Upgrade to Pro"):
                 try:
-                    upgrade_resp = call_backend("POST", "/account/upgrade", json_body={"new_plan": "pro"}, timeout=10)
+                    upgrade_resp = api_request("POST", "/account/upgrade", json={"new_plan": "pro"}, timeout=10)
                     if upgrade_resp and upgrade_resp.status_code == 200:
                         st.success("Upgraded to Pro plan! Refreshing...")
                         # st.rerun()
@@ -2039,7 +1947,7 @@ def render_analysis_results(inputs: Dict[str, Any], result: Dict[str, Any]) -> N
                     "account_id": 1,  # For development: mock account
                     "user_id": 1,     # For development: mock user
                 }
-                resp = call_backend("POST", "/property/save", json_body=payload, timeout=20)
+                resp = api_request("POST", "/property/save", json=payload, timeout=20)
                 if resp is None:
                     return
                 if resp.status_code == 200:
@@ -2115,7 +2023,7 @@ def render_scenarios_section(inputs: Dict[str, Any], result: Dict[str, Any]) -> 
                     "label": label,
                     "metrics": result
                 }
-                resp = call_backend("POST", "/scenario/save", json_body=payload, timeout=20)
+                resp = api_request("POST", "/scenario/save", json=payload, timeout=20)
                 if resp and resp.status_code == 200:
                     st.success(f"Scenario {save_slot} saved!")
                     st.rerun()  # Refresh to show updated list
@@ -2154,7 +2062,7 @@ def render_scenarios_section(inputs: Dict[str, Any], result: Dict[str, Any]) -> 
                     "property_id": property_id,
                     "slot": clear_slot
                 }
-                resp = call_backend("POST", "/scenario/clear", json_body=payload, timeout=20)
+                resp = api_request("POST", "/scenario/clear", json=payload, timeout=20)
                 if resp and resp.status_code == 200:
                     st.success(f"Scenario {clear_slot} cleared!")
                     st.rerun()  # Refresh to show updated list
@@ -2259,7 +2167,7 @@ def load_saved_deals() -> List[Dict[str, Any]]:
     """
     Load saved deals from backend.
     """
-    resp = call_backend_tracked("GET", "/property/saved", timeout=20, expects_auth=True)
+    resp = api_request("GET", "/property/saved", timeout=20)
     
     if resp is None or resp.status_code != 200:
         return []
@@ -2274,7 +2182,7 @@ def load_saved_deals() -> List[Dict[str, Any]]:
 
 
 def load_trash() -> List[Dict[str, Any]]:
-    resp = call_backend_tracked("GET", "/property/trash", timeout=20, expects_auth=True)
+    resp = api_request("GET", "/property/trash", timeout=20)
     if resp is None or resp.status_code != 200:
         return []
     try:
@@ -2287,7 +2195,7 @@ def load_trash() -> List[Dict[str, Any]]:
 
 
 def load_scenarios(property_id: int) -> List[Dict[str, Any]]:
-    resp = call_backend_tracked("GET", f"/scenario/list/{property_id}", timeout=20, tracked_name="/scenario/list", expects_auth=True)
+    resp = api_request("GET", f"/scenario/list/{property_id}", timeout=20)
     if resp is None or resp.status_code != 200:
         return []
     try:
@@ -2632,10 +2540,10 @@ def render_portfolio_and_trash() -> None:
             if selected_id is None:
                 st.warning("Choose a specific deal to delete.")
             else:
-                resp = call_backend(
+                resp = api_request(
                     "POST",
                     "/property/delete",
-                    json_body={"id": int(selected_id)},
+                    json={"id": int(selected_id)},
                     timeout=20,
                 )
                 if resp is None:
@@ -2709,10 +2617,10 @@ def render_portfolio_and_trash() -> None:
             if selected_trash_id is None:
                 st.warning("Pick a deal to restore.")
             else:
-                resp = call_backend(
+                resp = api_request(
                     "POST",
                     "/property/trash/restore",
-                    json_body={"trash_id": int(selected_trash_id)},
+                    json={"trash_id": int(selected_trash_id)},
                     timeout=20,
                 )
                 if resp is None:
@@ -2752,7 +2660,7 @@ def render_plans_billing() -> None:
         return
     
     try:
-        resp = call_backend("GET", "/account/info", timeout=10)
+        resp = api_request("GET", "/account/info", timeout=10)
         if resp and resp.status_code == 200:
             account_data = resp.json()
             current_plan = account_data.get("plan", "free")
@@ -2826,7 +2734,7 @@ def render_plans_billing() -> None:
     
     # Plan comparison
     try:
-        resp = call_backend("GET", "/account/plans", timeout=10)
+        resp = api_request("GET", "/account/plans", timeout=10)
         if resp and resp.status_code == 200:
             plans_data = resp.json()
             plans = plans_data.get("plans", [])
@@ -2871,7 +2779,7 @@ def render_plans_billing() -> None:
                     if plan['name'] != 'free':
                         if st.button(f"Upgrade to {plan['name'].title()}", key=f"upgrade_{plan['name']}"):
                             try:
-                                upgrade_resp = call_backend("POST", "/account/upgrade", json_body={"new_plan": plan['name']}, timeout=10)
+                                upgrade_resp = api_request("POST", "/account/upgrade", json={"new_plan": plan['name']}, timeout=10)
                                 if upgrade_resp and upgrade_resp.status_code == 200:
                                     st.success(f"Successfully upgraded to {plan['name'].title()} plan!")
                                     # st.rerun()
@@ -2950,7 +2858,7 @@ def render_login() -> None:
                 st.error("Please enter email and password.")
                 return
 
-            resp = call_backend("POST", "/auth/login", json_body={"email": email, "password": password}, timeout=10)
+            resp = api_request("POST", "/auth/login", json={"email": email, "password": password}, timeout=10)
             if resp is None:
                 return
             if resp.status_code == 200:
@@ -3001,11 +2909,11 @@ def render_login() -> None:
                 return
 
             # Call register endpoint
-            resp = call_backend(
+            resp = api_request(
                 "POST",
                 "/auth/register",
-                json_body={"email": reg_email, "password": reg_password, "account_name": reg_account_name},
-                timeout=10,
+                json={"email": reg_email, "password": reg_password, "account_name": reg_account_name},
+                timeout=10
             )
             if resp is None:
                 return
@@ -3013,8 +2921,8 @@ def render_login() -> None:
             if resp.status_code in (200, 201):
                 st.success("Registration successful! Logging you in...")
                 # Auto-login with same credentials
-                login_resp = call_backend(
-                    "POST", "/auth/login", json_body={"email": reg_email, "password": reg_password}, timeout=10
+                login_resp = api_request(
+                    "POST", "/auth/login", json={"email": reg_email, "password": reg_password}, timeout=10
                 )
                 if login_resp and login_resp.status_code == 200:
                     data = login_resp.json()
@@ -3066,11 +2974,11 @@ def render_login() -> None:
                 return
 
             # Call resume endpoint
-            resp = call_backend(
+            resp = api_request(
                 "POST",
                 "/auth/resume",
-                json_body={"resume_code": resume_code.strip()},
-                timeout=10,
+                json={"resume_code": resume_code.strip()},
+                timeout=10
             )
             if resp is None:
                 return
@@ -3221,7 +3129,7 @@ def render_property_search() -> None:
             
             # Call backend
             with st.spinner("Searching properties..."):
-                resp = call_backend_tracked("GET", search_url)
+                resp = api_request("GET", search_url)
             
             if resp and resp.status_code == 200:
                 results = resp.json()
@@ -3325,7 +3233,7 @@ def render_property_search() -> None:
                                     "notes": f"Added from Property Search on {datetime.utcnow().isoformat()}"
                                 }
                                 
-                                resp = call_backend_tracked("POST", "/assets/create", json_body=asset_data)
+                                resp = api_request("POST", "/assets/create", json=asset_data)
                                 
                                 if resp and resp.status_code == 200:
                                     asset_id = resp.json().get("asset_id")
@@ -3367,7 +3275,7 @@ def render_assets() -> None:
     
     # Load assets
     with st.spinner("Loading assets..."):
-        resp = call_backend_tracked("GET", "/assets/list")
+        resp = api_request("GET", "/assets/list")
     
     if not resp or resp.status_code != 200:
         st.error(f"Failed to load assets: {resp.status_code if resp else 'No response'}")
@@ -3412,7 +3320,7 @@ def render_assets() -> None:
         if selected_asset_id:
             # Fetch asset detail
             with st.spinner("Loading asset details..."):
-                resp_detail = call_backend_tracked("GET", f"/assets/get?asset_id={selected_asset_id}")
+                resp_detail = api_request("GET", f"/assets/get?asset_id={selected_asset_id}")
             
             if resp_detail and resp_detail.status_code == 200:
                 asset = resp_detail.json()
@@ -3491,7 +3399,7 @@ def render_assets() -> None:
                             "notes": edit_notes
                         }
                         
-                        resp_update = call_backend_tracked("POST", "/assets/update", json_body=update_data)
+                        resp_update = api_request("POST", "/assets/update", json=update_data)
                         
                         if resp_update and resp_update.status_code == 200:
                             st.success("✅ Asset updated successfully!")
@@ -3503,7 +3411,7 @@ def render_assets() -> None:
                 st.markdown("---")
                 if st.button("🗑️ Delete Asset", key="asset_delete_btn", type="secondary"):
                     if st.checkbox(f"Confirm deletion of Asset #{selected_asset_id}", key="asset_delete_confirm"):
-                        resp_delete = call_backend_tracked("POST", "/assets/delete", json_body={"asset_id": selected_asset_id})
+                        resp_delete = api_request("POST", "/assets/delete", json={"asset_id": selected_asset_id})
                         
                         if resp_delete and resp_delete.status_code == 200:
                             st.success("✅ Asset deleted successfully!")
@@ -3555,7 +3463,7 @@ def render_assets() -> None:
                     "notes": create_notes
                 }
                 
-                resp_create = call_backend_tracked("POST", "/assets/create", json_body=asset_data)
+                resp_create = api_request("POST", "/assets/create", json=asset_data)
                 
                 if resp_create and resp_create.status_code == 200:
                     asset_id = resp_create.json().get("asset_id")

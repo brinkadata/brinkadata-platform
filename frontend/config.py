@@ -4,11 +4,17 @@
 import os
 from typing import Literal
 
-# Environment detection - default to "production" on Render to prevent localhost fallback
-ENV: Literal["local", "staging", "production"] = os.environ.get("ENV", "production")  # type: ignore
-IS_DEV = (ENV == "local")
+# Environment detection - normalize to lowercase
+_raw_env = os.environ.get("ENV", "production").lower()
+ENV: Literal["local", "staging", "production"] = _raw_env if _raw_env in ("local", "staging", "production") else "production"  # type: ignore
+
+# Environment flags (using normalized ENV)
+IS_LOCAL = (ENV == "local")
 IS_STAGING = (ENV == "staging")
 IS_PROD = (ENV == "production")
+
+# Legacy aliases (backward compatibility)
+IS_DEV = IS_LOCAL
 
 
 def get_env() -> Literal["local", "staging", "production"]:
@@ -60,27 +66,28 @@ def get_api_base_url() -> str:
         RuntimeError: If production/staging environment has no configured URL
     """
     # Priority 1: BACKEND_URL (primary)
-    backend_url = os.environ.get("BACKEND_URL")
+    backend_url = os.environ.get("BACKEND_URL", "").strip()
     if backend_url:
         url = backend_url.rstrip("/")
         validate_api_url(url, ENV)
         return url
     
     # Priority 2: API_BASE_URL (legacy support)
-    api_base_url = os.environ.get("API_BASE_URL")
+    api_base_url = os.environ.get("API_BASE_URL", "").strip()
     if api_base_url:
         url = api_base_url.rstrip("/")
         validate_api_url(url, ENV)
         return url
     
-    # Priority 3: Local dev default
+    # Priority 3: Local dev default ONLY
     if ENV == "local":
         return "http://127.0.0.1:8000"
     
     # Priority 4: Error for production/staging without config
     raise RuntimeError(
-        f"Backend URL not configured for {ENV} environment. "
-        f"Please set BACKEND_URL or API_BASE_URL environment variable."
+        f"🚨 Backend URL not configured for {ENV.upper()} environment. "
+        f"Set BACKEND_URL environment variable on Render with your backend service URL. "
+        f"Production/staging MUST use HTTPS and cannot fall back to localhost."
     )
 
 
