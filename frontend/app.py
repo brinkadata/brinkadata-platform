@@ -1008,10 +1008,22 @@ def render_sidebar() -> None:
         else:
             st.caption("**User:** Not logged in")
 
-        # Account info
+        # Account info - dynamically show based on auth state
         st.markdown("### Account")
-        st.info("Logged in as: **Demo User** (Owner)")
-        st.caption("Account: Default Account (Free Plan)")
+        if current_user and isinstance(current_user, dict):
+            user_display = current_user.get("email", "User").split("@")[0]  # Show first part of email
+            role_display = current_user.get("role", "member").title()
+            st.info(f"Logged in as: **{user_display}** ({role_display})")
+            
+            # Show plan from capabilities if available
+            caps = ss.get("capabilities")
+            if caps and isinstance(caps, dict):
+                plan_display = caps.get("plan", "free").title()
+                st.caption(f"Plan: {plan_display}")
+            else:
+                st.caption("Plan: Loading...")
+        else:
+            st.caption("Not logged in")
         
         # Debug info (dev only)
         if ENABLE_DEBUG_UI:
@@ -3572,35 +3584,45 @@ def main() -> None:
     if not ss.get("session_rehydrated"):
         # Future: Check for session cookie/token here
         # For now, just mark as complete since we rely on login flow
-        ss["session_rehydrated"] = True
+        ss["session_rehydration"] = True
         
         # After rehydration, if user is authenticated but capabilities not loaded,
         # fetch them once (this handles cookie-based session restoration in future)
         if is_logged_in() and not ss.get("capabilities"):
             fetch_and_cache_capabilities()
 
-    # Force login if not authenticated
-    if not st.session_state.get("auth_token"):
-        st.session_state["nav_page"] = "Login"
+    # Force login if not authenticated (moved AFTER pending actions to allow post-login nav)
+    # Only redirect to Login if user is not authenticated AND not already on Login page
+    if not is_authenticated() and ss.get("nav_page") != "Login":
+        ss["nav_page"] = "Login"
     
     # Ping backend if needed (updates connection status for immediate UX feedback)
     # This runs before sidebar so status indicator updates immediately
     ping_backend_if_needed()
 
-    nav_choice = render_sidebar()
+    # Render sidebar (updates nav_page in session_state)
+    render_sidebar()
+    
+    # Use session_state nav_page as single source of truth for navigation
+    # This fixes the "button turns blue but page doesn't change" bug
+    nav_page = ss.get("nav_page", "Login")
 
-    if nav_choice == "Login":
+    if nav_page == "Login":
         render_login()
-    elif nav_choice == "Analyzer":
+    elif nav_page == "Analyzer":
         render_analyzer()
-    elif nav_choice == "Portfolio":
+    elif nav_page == "Portfolio":
         render_portfolio_and_trash()
-    elif nav_choice == "Plans & Billing":
+    elif nav_page == "Plans & Billing":
         render_plans_billing()
-    elif nav_choice == "Property Search":
+    elif nav_page == "Property Search":
         render_property_search()
-    elif nav_choice == "Assets":
+    elif nav_page == "Assets":
         render_assets()
+    else:
+        # Fallback to Login for unknown pages
+        ss["nav_page"] = "Login"
+        render_login()
 
 
 if __name__ == "__main__":
