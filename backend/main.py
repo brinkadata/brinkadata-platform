@@ -1334,6 +1334,13 @@ def resume_session(req: dict):
         "session_id": session_id
     })
     
+    # Safely extract role value (handles both Enum and string)
+    role_value = user_dict["role"]
+    if hasattr(role_value, 'value'):
+        role_value = role_value.value
+    else:
+        role_value = str(role_value)
+    
     return {
         "access_token": new_access_token,
         "refresh_token": new_refresh_token,
@@ -1341,7 +1348,8 @@ def resume_session(req: dict):
         "user": {
             "id": user_id,
             "email": user_dict["email"],
-            "account_id": account_id
+            "account_id": account_id,
+            "role": role_value  # ✅ CRITICAL: Include role for complete user payload
         }
     }
 
