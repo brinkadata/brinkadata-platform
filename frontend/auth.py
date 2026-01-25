@@ -210,9 +210,10 @@ def require_auth(redirect_to_login: bool = True) -> bool:
             # Show "Go to Login" button - MUST set state AND rerun for navigation to work
             # Using unique key to avoid conflicts across different page contexts
             if st.button("Go to Login", type="primary", key="goto_login_from_auth_guard"):
-                # Set navigation state to Login
+                # CRITICAL FIX: Use deterministic navigation
+                # Set navigation state to Login and immediately rerun
+                # This ensures the sidebar radio button also updates
                 st.session_state["nav_page"] = "Login"
-                # Immediately rerun to apply navigation change
                 st.rerun()
         
         return False

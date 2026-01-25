@@ -235,6 +235,23 @@ init_state()
 ss = st.session_state
 
 # --------------------------------------------------------------------
+# Navigation helper (single source of truth)
+# --------------------------------------------------------------------
+
+def go_to(page: str) -> None:
+    """
+    Deterministic navigation helper - SINGLE SOURCE OF TRUTH for page changes.
+    
+    Sets ss["nav_page"] and immediately triggers st.rerun().
+    This is the ONLY function that should be used for navigation.
+    
+    Args:
+        page: Target page name ("Login", "Analyzer", "Portfolio", etc.)
+    """
+    st.session_state["nav_page"] = page
+    st.rerun()
+
+# --------------------------------------------------------------------
 # Debug helpers
 # --------------------------------------------------------------------
 
@@ -1140,9 +1157,8 @@ def render_sidebar() -> None:
                 # Clear auth state using centralized helper
                 clear_auth()
                 
-                # Navigate to login page
-                ss["nav_page"] = "Login"
-                st.rerun()
+                # Navigate to login page using deterministic router
+                go_to("Login")
         
         # Auth Smoke Test (visible when authenticated)
         if auth_token:
@@ -1361,45 +1377,69 @@ def render_sidebar() -> None:
         # Combine core and future features
         all_nav_options = nav_options + future_features
         
-        # Determine current index
-        current_page = ss.get("nav_page", "Analyzer")
-        if current_page in ["Login", "Analyzer", "Portfolio", "Plans & Billing"]:
-            current_index = nav_options.index(current_page)
-        else:
-            current_index = 1  # Default to Analyzer
+        # CRITICAL FIX: Map display options to canonical page names
+        # This enables locked/disabled features to show in sidebar without breaking navigation
+        nav_option_map = {
+            "Login": "Login",
+            "Analyzer": "Analyzer",
+            "Portfolio": "Portfolio",
+            "Plans & Billing": "Plans & Billing",
+            "🔹 Projects": "Projects",
+            "🔒 Projects (Coming Soon)": "Projects",
+            "🔹 Assets": "Assets",
+            "🔒 Assets (Coming Soon)": "Assets",
+            "🔹 Property Search": "Property Search",
+            "🔒 Property Search (Coming Soon)": "Property Search",
+        }
         
-        nav_choice = st.radio(
+        # Determine current index based on actual nav_page state
+        current_page = ss.get("nav_page", "Analyzer")
+        
+        # Find which display option corresponds to current page
+        current_index = 1  # Default to Analyzer
+        for idx, opt in enumerate(all_nav_options):
+            if nav_option_map.get(opt) == current_page:
+                current_index = idx
+                break
+        
+        # Radio button now directly controls nav_page via on_change callback
+        # We'll handle the mapping after the radio is rendered
+        nav_choice_display = st.radio(
             "Go to",
             all_nav_options,
             index=current_index,
-            key="nav_page_selector",
+            key="_nav_radio_display",  # Temporary key for display value
         )
         
-        # Handle selection
-        if nav_choice in nav_options:
-            # Core feature selected
-            ss["nav_page"] = nav_choice
-        elif "Projects" in nav_choice:
-            if can("project:create"):
-                ss["nav_page"] = "Projects"
-            else:
-                st.info("🔒 Projects requires project management permissions. Available in higher plans or future release.")
-        elif "Assets" in nav_choice:
-            if can("asset:manage"):
-                ss["nav_page"] = "Assets"
-            else:
-                st.info("🔒 Assets requires asset management permissions. Upgrade your plan or contact your admin.")
-        elif "Property Search" in nav_choice:
-            if can("search:advanced"):
-                ss["nav_page"] = "Property Search"
-            else:
-                st.info("🔒 Property Search requires advanced search permissions. Available in Pro+ plans.")
+        # Map selected display option to canonical page name
+        target_page = nav_option_map.get(nav_choice_display, "Analyzer")
         
-        # Sync nav_page state for consistency
-        if nav_choice in nav_options:
-            nav_choice_final = nav_choice
-        else:
-            nav_choice_final = ss.get("nav_page", "Analyzer")
+        # Check if user selected a locked feature
+        if "🔒" in nav_choice_display:
+            # Show info message but don't navigate
+            if "Projects" in nav_choice_display:
+                st.info("🔒 Projects requires project management permissions. Available in higher plans or future release.")
+            elif "Assets" in nav_choice_display:
+                st.info("🔒 Assets requires asset management permissions. Upgrade your plan or contact your admin.")
+            elif "Property Search" in nav_choice_display:
+                st.info("🔒 Property Search requires advanced search permissions. Available in Pro+ plans.")
+            # Keep current page (don't navigate)
+            target_page = current_page
+        elif "🔹" in nav_choice_display:
+            # Feature is available - check permission
+            if "Projects" in nav_choice_display and not can("project:create"):
+                st.info("🔒 Projects requires project management permissions.")
+                target_page = current_page
+            elif "Assets" in nav_choice_display and not can("asset:manage"):
+                st.info("🔒 Assets requires asset management permissions.")
+                target_page = current_page
+            elif "Property Search" in nav_choice_display and not can("search:advanced"):
+                st.info("🔒 Property Search requires advanced search permissions.")
+                target_page = current_page
+        
+        # Update nav_page ONLY if it changed (avoids unnecessary reruns)
+        if ss.get("nav_page") != target_page:
+            ss["nav_page"] = target_page
 
         st.markdown("### Behavior")
         st.checkbox(
@@ -1437,6 +1477,17 @@ def render_sidebar() -> None:
             st.markdown("---")
             with st.expander("🔎 State Debug (DEV)", expanded=False):
                 st.caption("DEV-only diagnostics for session state debugging")
+                
+                # Navigation debug info
+                st.markdown("##### Navigation State")
+                st.text(f"nav_page: {ss.get('nav_page', 'NONE')}")
+                st.text(f"_nav_radio_display: {ss.get('_nav_radio_display', 'NONE')}")
+                st.text(f"is_authenticated: {is_authenticated()}")
+                st.text(f"auth_token present: {'Yes' if ss.get('auth_token') else 'No'}")
+                st.text(f"current_user present: {'Yes' if ss.get('current_user') else 'No'}")
+                if ss.get("current_user"):
+                    st.text(f"user role: {ss.get('current_user', {}).get('role', 'NONE')}")
+                st.text(f"session_rehydrated: {ss.get('session_rehydrated', False)}")
                 
                 # Change detection summary
                 if 'detect_state_changes' in globals():
@@ -1572,8 +1623,6 @@ def render_sidebar() -> None:
                         clear_debug_history(ss)
                         st.success("Debug history cleared")
                         st.rerun()
-
-    return nav_choice_final
 
 
 # --------------------------------------------------------------------
