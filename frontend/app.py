@@ -3591,10 +3591,19 @@ def main() -> None:
         if is_logged_in() and not ss.get("capabilities"):
             fetch_and_cache_capabilities()
 
-    # Force login if not authenticated (moved AFTER pending actions to allow post-login nav)
-    # Only redirect to Login if user is not authenticated AND not already on Login page
-    if not is_authenticated() and ss.get("nav_page") != "Login":
-        ss["nav_page"] = "Login"
+    # FIX: Only force Login when nav_page is not already set or is missing.
+    # This prevents overwriting user navigation selection (e.g., clicking Analyzer).
+    # 
+    # CRITICAL: This gate MUST NOT run on every rerun if user is not authenticated.
+    # Original bug: This line always ran when not authenticated, overwriting nav_page
+    # even if user just clicked Analyzer in sidebar.
+    # 
+    # Solution: Only set default navigation when nav_page is uninitialized.
+    # Once nav_page is set (by init_state or sidebar), respect it.
+    # The require_auth() guard inside each page will show warnings if needed.
+    if not ss.get("nav_page"):
+        # Only set default nav when missing (first load)
+        ss["nav_page"] = "Login" if not is_authenticated() else "Analyzer"
     
     # Ping backend if needed (updates connection status for immediate UX feedback)
     # This runs before sidebar so status indicator updates immediately
