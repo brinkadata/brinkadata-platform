@@ -205,13 +205,15 @@ def require_auth(redirect_to_login: bool = True) -> bool:
         st.warning("⚠️ You must be logged in to access this page.")
         
         if redirect_to_login:
-            st.session_state["nav_page"] = "Login"
             st.info("Please log in to continue.")
-        
-        # Show login button for convenience
-        if st.button("Go to Login", type="primary"):
-            st.session_state["nav_page"] = "Login"
-            st.rerun()
+            
+            # Show "Go to Login" button - MUST set state AND rerun for navigation to work
+            # Using unique key to avoid conflicts across different page contexts
+            if st.button("Go to Login", type="primary", key="goto_login_from_auth_guard"):
+                # Set navigation state to Login
+                st.session_state["nav_page"] = "Login"
+                # Immediately rerun to apply navigation change
+                st.rerun()
         
         return False
     

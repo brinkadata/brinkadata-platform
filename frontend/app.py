@@ -185,8 +185,9 @@ def init_state() -> None:
     # This ensures auth keys are properly initialized on every rerun
     init_auth_state()
     
-    # Navigation
-    ss.setdefault("nav_page", "Analyzer")
+    # Navigation - DO NOT set default here; will be set intelligently in main() based on auth state
+    # This prevents the bug where logged-out users see Analyzer with "must be logged in" message
+    ss.setdefault("nav_page", None)
 
     # Behavior
     ss.setdefault("auto_run_after_load", True)
@@ -3591,19 +3592,42 @@ def main() -> None:
         if is_logged_in() and not ss.get("capabilities"):
             fetch_and_cache_capabilities()
 
-    # FIX: Only force Login when nav_page is not already set or is missing.
-    # This prevents overwriting user navigation selection (e.g., clicking Analyzer).
+    # FIX: Set default navigation based on auth state EVERY time nav_page is missing/None
+    # This ensures logged-out users ALWAYS land on Login, not Analyzer
     # 
-    # CRITICAL: This gate MUST NOT run on every rerun if user is not authenticated.
-    # Original bug: This line always ran when not authenticated, overwriting nav_page
-    # even if user just clicked Analyzer in sidebar.
+    # CRITICAL: This must run on EVERY rerun when nav_page is None (not just first load)
+    # because nav_page can be cleared/reset in various flows (logout, session expire, etc.)
     # 
-    # Solution: Only set default navigation when nav_page is uninitialized.
-    # Once nav_page is set (by init_state or sidebar), respect it.
-    # The require_auth() guard inside each page will show warnings if needed.
+    # The is_authenticated() check is deterministic: True iff access token exists and non-empty
     if not ss.get("nav_page"):
-        # Only set default nav when missing (first load)
-        ss["nav_page"] = "Login" if not is_authenticated() else "Analyzer"
+        # Set default based on current auth state
+        ss["nav_page"] = "Analyzer" if is_authenticated() else "Login"
+    
+    # =========================================================================
+    # SAFE STARTUP ROUTING DIAGNOSTICS (PRODUCTION-SAFE)
+    # =========================================================================
+    # Log critical routing state on EVERY rerun to stdout (never logs tokens/emails)
+    # This helps diagnose "stuck on wrong page" issues without exposing sensitive data
+    # =========================================================================
+    _selected_page = ss.get("nav_page", "UNKNOWN")
+    _token_present = bool(ss.get("auth_token"))
+    _user_present = bool(ss.get("current_user"))
+    _user_role = None
+    if _user_present and isinstance(ss.get("current_user"), dict):
+        _user_role = ss.get("current_user", {}).get("role", "NONE")
+    
+    # Always print to stdout (safe for production - no PII)
+    print(f"[ROUTING] page={_selected_page} | token_present={_token_present} | user_present={_user_present} | role={_user_role}")
+    
+    # DEV-only: Also track via observability if available
+    if IS_DEV and 'track_event' in globals():
+        track_event(ss, "routing_state", {
+            "page": _selected_page,
+            "token_present": _token_present,
+            "user_present": _user_present,
+            "role": _user_role
+        })
+    # =========================================================================
     
     # Ping backend if needed (updates connection status for immediate UX feedback)
     # This runs before sidebar so status indicator updates immediately
