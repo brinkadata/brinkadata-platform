@@ -239,15 +239,27 @@ ss = st.session_state
 
 def go_to(page: str) -> None:
     """
-    Deterministic navigation helper - SINGLE SOURCE OF TRUTH for page changes.
-    
-    Sets ss["nav_page"] and immediately triggers st.rerun().
-    This is the ONLY function that should be used for navigation.
-    
-    Args:
-        page: Target page name ("Login", "Analyzer", "Portfolio", etc.)
+    Atomic navigation:
+    - nav_page is the single source of truth
+    - nav_page_radio MUST be kept in sync or Streamlit will keep the old radio selection
+      and force us back into the previous page on the next rerun (causes Analyzer↔Login bounce).
     """
-    st.session_state["nav_page"] = page
+    ss = st.session_state
+    ss["nav_page"] = page
+
+    # Keep the navigation radio widget synchronized with nav_page.
+    # If we don't do this, Streamlit may keep the prior radio selection even if `index=` changes.
+    page_to_display = {
+        "Login": "Login",
+        "Analyzer": "Analyzer",
+        "Portfolio": "Portfolio",
+        "Plans & Billing": "Plans & Billing",
+        "Projects": "🔒 Projects (Coming Soon)",
+        "Assets": "🔒 Assets (Coming Soon)",
+        "Property Search": "🔒 Property Search (Coming Soon)",
+    }
+    ss["nav_page_radio"] = page_to_display.get(page, "Analyzer")
+
     st.rerun()
 
 # --------------------------------------------------------------------
@@ -1401,6 +1413,12 @@ def render_sidebar() -> None:
             if nav_option_map.get(opt) == current_page:
                 current_index = idx
                 break
+        
+        # Force radio widget state to match nav_page BEFORE rendering the widget.
+        # Streamlit will ignore `index=` once the widget key exists unless we update session_state.
+        desired_display = all_nav_options[current_index]
+        if ss.get("nav_page_radio") != desired_display:
+            ss["nav_page_radio"] = desired_display
         
         # Radio button synchronized with nav_page - always reflects current page
         nav_choice_display = st.radio(
@@ -3631,7 +3649,7 @@ def main() -> None:
     if not ss.get("session_rehydrated"):
         # Future: Check for session cookie/token here
         # For now, just mark as complete since we rely on login flow
-        ss["session_rehydration"] = True
+        ss["session_rehydrated"] = True
         
         # After rehydration, if user is authenticated but capabilities not loaded,
         # fetch them once (this handles cookie-based session restoration in future)
