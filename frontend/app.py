@@ -247,12 +247,14 @@ ss = st.session_state
 
 def go_to(page: str) -> None:
     """
-    Atomic navigation:
-    - nav_page is the single source of truth
-    - Radio will automatically sync on next render via index parameter
+    Deferred navigation to prevent StreamlitAPIException:
+    - Sets _pending_nav_page flag instead of modifying nav_page directly
+    - apply_pending_actions() will apply it BEFORE widgets are created
+    - Prevents widget-key conflicts during sidebar/page rendering
     """
     ss = st.session_state
-    ss["nav_page"] = page
+    # Defer nav changes so they are applied BEFORE widgets are created (prevents StreamlitAPIException)
+    ss["_pending_nav_page"] = page
     st.rerun()
 
 
@@ -793,6 +795,16 @@ def apply_pending_actions() -> bool:
         applied_keys.append("_apply_payload")
         if IS_DEV:
             print("[DEFERRED] Applied auth payload")
+    
+    # 1a. Apply pending navigation (from sidebar clicks or page buttons)
+    # Must run BEFORE _post_login_nav so post-login redirect can override if needed
+    if ss.get("_pending_nav_page"):
+        target_page = ss.pop("_pending_nav_page")
+        ss["nav_page"] = target_page
+        applied_any = True
+        applied_keys.append("_pending_nav_page")
+        if IS_DEV:
+            print(f"[DEFERRED] Pending nav to {target_page}")
     
     # 2. Apply navigation redirect (after successful login/resume)
     if ss.get("_post_login_nav"):
@@ -1389,14 +1401,15 @@ def render_sidebar() -> None:
         # Enforce auth gate + coming soon behavior deterministically
         if selected in coming_soon:
             st.info("This feature is coming soon.")
-            ss["nav_page"] = ss["_last_valid_page"]
-            st.rerun()
+            last_valid = ss.get("_last_valid_page", "Login")
+            go_to(last_valid)
+            return
         
         if selected in protected and not is_authenticated():
             st.warning("You must be logged in to access this page.")
             ss["_redirect_after_login"] = selected
-            ss["nav_page"] = "Login"
-            st.rerun()
+            go_to("Login")
+            return
         
         # If we get here, the selection is valid — store it as last valid page
         ss["_last_valid_page"] = selected
@@ -2852,11 +2865,12 @@ def safe_delta(val1: Optional[float], val2: Optional[float], is_percentage: bool
 def render_login() -> None:
     # CRITICAL: Clear widget keys BEFORE creating widgets to avoid Streamlit mutation error.
     # Streamlit owns widget keys once created; we can't modify them in the same run.
-    # Pattern: Set flag on success → rerun → clear keys before widget creation.
-    if ss.get("_clear_login_fields"):
-        ss.pop("login_email", None)
+    # Pattern: Set flag on success/failure → rerun → clear keys before widget creation.
+    if ss.pop("_clear_login_fields", False):
+        # Must remove keys BEFORE widgets instantiate
         ss.pop("login_password", None)
-        ss.pop("_clear_login_fields", None)
+        # Optional: also clear email on failure (currently we keep email for retry convenience)
+        # ss.pop("login_email", None)
     
     if ss.get("_clear_register_fields"):
         ss.pop("register_email", None)
@@ -2912,11 +2926,13 @@ def render_login() -> None:
             else:
                 st.error(f"Login failed: {resp.status_code}")
                 # Clear password on failed login (keep email)
-                ss["login_password"] = ""
+                # Use deferred clearing to avoid StreamlitAPIException
+                ss["_clear_login_fields"] = True
                 try:
                     st.code(resp.text, language="json")
                 except Exception:
                     pass
+                st.rerun()
 
     st.divider()
     st.subheader("Register New Account")
@@ -3655,8 +3671,8 @@ def main() -> None:
         # Hard auth gate: Analyzer must never render unless authenticated
         if not is_authenticated():
             st.warning("You must log in to access this page.")
-            st.session_state["nav_page"] = "Login"
-            st.rerun()
+            go_to("Login")
+            return
         render_analyzer()
     elif nav_page == "Portfolio":
         render_portfolio_and_trash()
@@ -3668,8 +3684,8 @@ def main() -> None:
         render_assets()
     else:
         # Fallback to Login for unknown pages
-        ss["nav_page"] = "Login"
-        render_login()
+        go_to("Login")
+        return
 
 
 if __name__ == "__main__":
