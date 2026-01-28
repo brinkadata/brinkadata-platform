@@ -241,26 +241,12 @@ def go_to(page: str) -> None:
     """
     Atomic navigation:
     - nav_page is the single source of truth
-    - nav_page_radio MUST be kept in sync or Streamlit will keep the old radio selection
-      and force us back into the previous page on the next rerun (causes Analyzer↔Login bounce).
+    - Radio will automatically sync on next render via index parameter
     """
     ss = st.session_state
     ss["nav_page"] = page
-
-    # Keep the navigation radio widget synchronized with nav_page.
-    # If we don't do this, Streamlit may keep the prior radio selection even if `index=` changes.
-    page_to_display = {
-        "Login": "Login",
-        "Analyzer": "Analyzer",
-        "Portfolio": "Portfolio",
-        "Plans & Billing": "Plans & Billing",
-        "Projects": "🔒 Projects (Coming Soon)",
-        "Assets": "🔒 Assets (Coming Soon)",
-        "Property Search": "🔒 Property Search (Coming Soon)",
-    }
-    ss["nav_page_radio"] = page_to_display.get(page, "Analyzer")
-
     st.rerun()
+
 
 # --------------------------------------------------------------------
 # Debug helpers
@@ -1362,101 +1348,26 @@ def render_sidebar() -> None:
 
         st.markdown("### Navigation")
         
-        # Build navigation options with capability-based availability
-        nav_options = ["Login", "Analyzer", "Portfolio", "Plans & Billing"]
+        # ----------------------------
+        # Deterministic Navigation
+        # ----------------------------
         
-        # Add future feature placeholders (disabled based on capabilities)
-        future_features = []
+        PAGES = ["Login", "Analyzer", "Portfolio", "Plans & Billing"]
         
-        # Projects (requires project:create capability)
-        if can("project:create"):
-            future_features.append("🔹 Projects")
-        else:
-            future_features.append("🔒 Projects (Coming Soon)")
+        if "nav_page" not in st.session_state:
+            st.session_state["nav_page"] = "Login"
         
-        # Assets (requires asset:manage capability)
-        if can("asset:manage"):
-            future_features.append("🔹 Assets")
-        else:
-            future_features.append("🔒 Assets (Coming Soon)")
-        
-        # Property Search (requires search:advanced capability)
-        if can("search:advanced"):
-            future_features.append("🔹 Property Search")
-        else:
-            future_features.append("🔒 Property Search (Coming Soon)")
-        
-        # Combine core and future features
-        all_nav_options = nav_options + future_features
-        
-        # CRITICAL FIX: Map display options to canonical page names
-        # This enables locked/disabled features to show in sidebar without breaking navigation
-        nav_option_map = {
-            "Login": "Login",
-            "Analyzer": "Analyzer",
-            "Portfolio": "Portfolio",
-            "Plans & Billing": "Plans & Billing",
-            "🔹 Projects": "Projects",
-            "🔒 Projects (Coming Soon)": "Projects",
-            "🔹 Assets": "Assets",
-            "🔒 Assets (Coming Soon)": "Assets",
-            "🔹 Property Search": "Property Search",
-            "🔒 Property Search (Coming Soon)": "Property Search",
-        }
-        
-        # Determine current index based on actual nav_page state
-        current_page = ss.get("nav_page", "Analyzer")
-        
-        # Find which display option corresponds to current page
-        current_index = 1  # Default to Analyzer
-        for idx, opt in enumerate(all_nav_options):
-            if nav_option_map.get(opt) == current_page:
-                current_index = idx
-                break
-        
-        # Force radio widget state to match nav_page BEFORE rendering the widget.
-        # Streamlit will ignore `index=` once the widget key exists unless we update session_state.
-        desired_display = all_nav_options[current_index]
-        if ss.get("nav_page_radio") != desired_display:
-            ss["nav_page_radio"] = desired_display
-        
-        # Radio button synchronized with nav_page - always reflects current page
-        nav_choice_display = st.radio(
+        selected = st.radio(
             "Go to",
-            all_nav_options,
-            index=current_index,
-            key="nav_page_radio",
+            PAGES,
+            index=PAGES.index(st.session_state["nav_page"]) if st.session_state["nav_page"] in PAGES else 0,
+            key="nav_radio"
         )
         
-        # Map selected display option to canonical page name
-        target_page = nav_option_map.get(nav_choice_display, "Analyzer")
-        
-        # Check if user selected a locked feature
-        if "🔒" in nav_choice_display:
-            # Show info message but don't navigate
-            if "Projects" in nav_choice_display:
-                st.info("🔒 Projects requires project management permissions. Available in higher plans or future release.")
-            elif "Assets" in nav_choice_display:
-                st.info("🔒 Assets requires asset management permissions. Upgrade your plan or contact your admin.")
-            elif "Property Search" in nav_choice_display:
-                st.info("🔒 Property Search requires advanced search permissions. Available in Pro+ plans.")
-            # Keep current page (don't navigate)
-            target_page = current_page
-        elif "🔹" in nav_choice_display:
-            # Feature is available - check permission
-            if "Projects" in nav_choice_display and not can("project:create"):
-                st.info("🔒 Projects requires project management permissions.")
-                target_page = current_page
-            elif "Assets" in nav_choice_display and not can("asset:manage"):
-                st.info("🔒 Assets requires asset management permissions.")
-                target_page = current_page
-            elif "Property Search" in nav_choice_display and not can("search:advanced"):
-                st.info("🔒 Property Search requires advanced search permissions.")
-                target_page = current_page
-        
-        # Update nav_page ONLY if it changed (atomic navigation with immediate rerun)
-        if ss.get("nav_page") != target_page:
-            go_to(target_page)
+        # Only update if user changed selection
+        if selected != st.session_state["nav_page"]:
+            st.session_state["nav_page"] = selected
+            st.rerun()
 
         st.markdown("### Behavior")
         st.checkbox(
@@ -3709,7 +3620,9 @@ def main() -> None:
     elif nav_page == "Analyzer":
         # Hard auth gate: Analyzer must never render unless authenticated
         if not is_authenticated():
-            go_to("Login")
+            st.warning("You must log in to access this page.")
+            st.session_state["nav_page"] = "Login"
+            st.rerun()
         render_analyzer()
     elif nav_page == "Portfolio":
         render_portfolio_and_trash()
