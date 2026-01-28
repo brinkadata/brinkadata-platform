@@ -185,9 +185,8 @@ def init_state() -> None:
     # This ensures auth keys are properly initialized on every rerun
     init_auth_state()
     
-    # Navigation - DO NOT set default here; will be set intelligently in main() based on auth state
-    # This prevents the bug where logged-out users see Analyzer with "must be logged in" message
-    ss.setdefault("nav_page", None)
+    # nav_page must never be None — deterministic first render
+    ss.setdefault("nav_page", "Login")
 
     # Behavior
     ss.setdefault("auto_run_after_load", True)
@@ -792,7 +791,8 @@ def apply_pending_actions() -> bool:
     # 2. Apply navigation redirect (after successful login/resume)
     if ss.get("_post_login_nav"):
         target_page = ss.pop("_post_login_nav")  # Pop removes it permanently
-        ss["nav_page"] = target_page
+        go_to(target_page)
+        # go_to() triggers rerun immediately, so we never reach this line
         applied_any = True
         applied_keys.append("_post_login_nav")
         if IS_DEV:
@@ -1402,13 +1402,12 @@ def render_sidebar() -> None:
                 current_index = idx
                 break
         
-        # Radio button now directly controls nav_page via on_change callback
-        # We'll handle the mapping after the radio is rendered
+        # Radio button synchronized with nav_page - always reflects current page
         nav_choice_display = st.radio(
             "Go to",
             all_nav_options,
             index=current_index,
-            key="_nav_radio_display",  # Temporary key for display value
+            key="nav_page_radio",
         )
         
         # Map selected display option to canonical page name
@@ -1437,9 +1436,9 @@ def render_sidebar() -> None:
                 st.info("🔒 Property Search requires advanced search permissions.")
                 target_page = current_page
         
-        # Update nav_page ONLY if it changed (avoids unnecessary reruns)
+        # Update nav_page ONLY if it changed (atomic navigation with immediate rerun)
         if ss.get("nav_page") != target_page:
-            ss["nav_page"] = target_page
+            go_to(target_page)
 
         st.markdown("### Behavior")
         st.checkbox(
@@ -3277,8 +3276,7 @@ def render_property_search() -> None:
                                 "state": selected.get("state", ""),
                                 "zip_code": selected.get("zip", ""),
                             }
-                            ss["nav_page"] = "Analyzer"
-                            st.rerun()
+                            go_to("Analyzer")
                     
                     with col_action2:
                         # Save as Asset (gated by asset:manage)
@@ -3432,8 +3430,7 @@ def render_assets() -> None:
                             "state": asset.get("state", ""),
                             "zip_code": asset.get("zip_code", ""),
                         }
-                        ss["nav_page"] = "Analyzer"
-                        st.rerun()
+                        go_to("Analyzer")
                 else:
                     st.button("🔒 Analyze this Asset", key="asset_analyze_btn_locked", disabled=True)
                     st.caption("⚠️ Requires analysis permissions. Available in all plans.")
@@ -3692,6 +3689,9 @@ def main() -> None:
     if nav_page == "Login":
         render_login()
     elif nav_page == "Analyzer":
+        # Hard auth gate: Analyzer must never render unless authenticated
+        if not is_authenticated():
+            go_to("Login")
         render_analyzer()
     elif nav_page == "Portfolio":
         render_portfolio_and_trash()
