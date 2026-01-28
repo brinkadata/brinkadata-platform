@@ -185,8 +185,16 @@ def init_state() -> None:
     # This ensures auth keys are properly initialized on every rerun
     init_auth_state()
     
-    # nav_page must never be None — deterministic first render
+    # Navigation
+    # nav_page is the single source of truth for routing (sidebar radio uses key="nav_page")
     ss.setdefault("nav_page", "Login")
+    ss.setdefault("_nav_initialized", False)          # one-time initial route selection
+    ss.setdefault("_redirect_after_login", None)      # protected page intent when logged out
+    ss.setdefault("_last_valid_page", "Login")        # remember last valid page for reverting
+
+    # Login form UX helpers
+    ss.setdefault("login_email", "")
+    ss.setdefault("login_password", "")
 
     # Behavior
     ss.setdefault("auto_run_after_load", True)
@@ -1348,26 +1356,50 @@ def render_sidebar() -> None:
 
         st.markdown("### Navigation")
         
-        # ----------------------------
-        # Deterministic Navigation
-        # ----------------------------
+        # Canonical pages (single source of truth)
+        pages = [
+            "Login",
+            "Analyzer",
+            "Portfolio",
+            "Plans & Billing",
+            "Projects",
+            "Assets",
+            "Property Search",
+        ]
         
-        PAGES = ["Login", "Analyzer", "Portfolio", "Plans & Billing"]
+        # Pages that should be locked/disabled in UI (still displayed, but selection reverts)
+        coming_soon = {"Projects", "Assets", "Property Search"}
         
-        if "nav_page" not in st.session_state:
-            st.session_state["nav_page"] = "Login"
+        # Pages that require authentication
+        protected = {"Analyzer", "Portfolio", "Plans & Billing"} | coming_soon
         
+        def _label(p: str) -> str:
+            if p in coming_soon:
+                return f"🔒 {p} (Coming Soon)"
+            return p
+        
+        # Render radio using nav_page itself as the widget state
         selected = st.radio(
             "Go to",
-            PAGES,
-            index=PAGES.index(st.session_state["nav_page"]) if st.session_state["nav_page"] in PAGES else 0,
-            key="nav_radio"
+            options=pages,
+            key="nav_page",
+            format_func=_label,
         )
         
-        # Only update if user changed selection
-        if selected != st.session_state["nav_page"]:
-            st.session_state["nav_page"] = selected
+        # Enforce auth gate + coming soon behavior deterministically
+        if selected in coming_soon:
+            st.info("This feature is coming soon.")
+            ss["nav_page"] = ss["_last_valid_page"]
             st.rerun()
+        
+        if selected in protected and not is_authenticated():
+            st.warning("You must be logged in to access this page.")
+            ss["_redirect_after_login"] = selected
+            ss["nav_page"] = "Login"
+            st.rerun()
+        
+        # If we get here, the selection is valid — store it as last valid page
+        ss["_last_valid_page"] = selected
 
         st.markdown("### Behavior")
         st.checkbox(
@@ -2879,6 +2911,8 @@ def render_login() -> None:
                     st.error("Login failed: incomplete session data.")
             else:
                 st.error(f"Login failed: {resp.status_code}")
+                # Clear password on failed login (keep email)
+                ss["login_password"] = ""
                 try:
                     st.code(resp.text, language="json")
                 except Exception:
@@ -3567,16 +3601,16 @@ def main() -> None:
         if is_logged_in() and not ss.get("capabilities"):
             fetch_and_cache_capabilities()
 
-    # FIX: Set default navigation based on auth state EVERY time nav_page is missing/None
-    # This ensures logged-out users ALWAYS land on Login, not Analyzer
-    # 
-    # CRITICAL: This must run on EVERY rerun when nav_page is None (not just first load)
-    # because nav_page can be cleared/reset in various flows (logout, session expire, etc.)
-    # 
-    # The is_authenticated() check is deterministic: True iff access token exists and non-empty
-    if not ss.get("nav_page"):
-        # Set default based on current auth state
+    # One-time initial routing decision (prevents router from fighting sidebar selection)
+    if not ss.get("_nav_initialized"):
         ss["nav_page"] = "Analyzer" if is_authenticated() else "Login"
+        ss["_nav_initialized"] = True
+    
+    # If we just authenticated and have an intended destination, go there once
+    if is_authenticated() and ss.get("_redirect_after_login"):
+        ss["nav_page"] = ss["_redirect_after_login"]
+        ss["_redirect_after_login"] = None
+        st.rerun()
     
     # =========================================================================
     # SAFE STARTUP ROUTING DIAGNOSTICS (PRODUCTION-SAFE)
