@@ -55,6 +55,15 @@ if IS_DEV:
         )
 
 # --------------------------------------------------------------------
+# Navigation State Constants
+# --------------------------------------------------------------------
+
+# Navigation state keys (separate widget key from router state)
+NAV_STATE_KEY = "nav_page"              # router state (NOT used as a widget key)
+NAV_WIDGET_KEY = "nav_page_radio"       # sidebar radio widget key (ONLY used by st.radio)
+NAV_DEFERRED_KEY = "_nav_to"            # deferred programmatic navigation target
+
+# --------------------------------------------------------------------
 # Custom CSS for theme
 # --------------------------------------------------------------------
 
@@ -187,7 +196,9 @@ def init_state() -> None:
     
     # Navigation
     # nav_page is the single source of truth for routing (sidebar radio uses key="nav_page")
-    ss.setdefault("nav_page", "Login")
+    ss.setdefault(NAV_STATE_KEY, None)
+    ss.setdefault(NAV_WIDGET_KEY, None)
+    ss.setdefault(NAV_DEFERRED_KEY, None)
     ss.setdefault("_nav_initialized", False)          # one-time initial route selection
     ss.setdefault("_redirect_after_login", None)      # protected page intent when logged out
     ss.setdefault("_last_valid_page", "Login")        # remember last valid page for reverting
@@ -195,6 +206,9 @@ def init_state() -> None:
     # Login form UX helpers
     ss.setdefault("login_email", "")
     ss.setdefault("login_password", "")
+    ss.setdefault("_clear_login_password", False)
+    ss.setdefault("login_error", None)
+    ss.setdefault("login_error_detail", None)
 
     # Behavior
     ss.setdefault("auto_run_after_load", True)
@@ -246,15 +260,12 @@ ss = st.session_state
 # --------------------------------------------------------------------
 
 def go_to(page: str) -> None:
-    """
-    Deferred navigation to prevent StreamlitAPIException:
-    - Sets _pending_nav_page flag instead of modifying nav_page directly
-    - apply_pending_actions() will apply it BEFORE widgets are created
-    - Prevents widget-key conflicts during sidebar/page rendering
+    """Programmatic navigation that never mutates widget keys after instantiation.
+    Sets a deferred target and triggers a rerun. The deferred target is applied
+    early in main() before the sidebar radio widget is created.
     """
     ss = st.session_state
-    # Defer nav changes so they are applied BEFORE widgets are created (prevents StreamlitAPIException)
-    ss["_pending_nav_page"] = page
+    ss[NAV_DEFERRED_KEY] = page
     st.rerun()
 
 
@@ -730,12 +741,13 @@ def apply_pending_actions() -> bool:
     populated with correct values before widget instantiation.
     
     Execution order (strict):
-        0. _post_recovery_rerun: Backend recovery auto-refresh (SAFE rerun before widgets)
-        1. _apply_payload: Auth/session data from login/register/resume
-        2. _post_login_nav: Navigation redirect after successful auth
-        3. _apply_address_payload: Analyzer address field prefill
-        4. _refresh_portfolio_lists: Trigger portfolio/trash list refresh
-        5. normalize_auth_context: Ensure canonical auth keys are present
+        0. _nav_to: Deferred navigation (SAFE rerun before widgets)
+        1. _post_recovery_rerun: Backend recovery auto-refresh (SAFE rerun before widgets)
+        2. _apply_payload: Auth/session data from login/register/resume
+        3. _post_login_nav: Navigation redirect after successful auth
+        4. _apply_address_payload: Analyzer address field prefill
+        5. _refresh_portfolio_lists: Trigger portfolio/trash list refresh
+        6. normalize_auth_context: Ensure canonical auth keys are present
     
     Returns:
         True if any action was applied (caller should st.rerun() once)
@@ -758,7 +770,19 @@ def apply_pending_actions() -> bool:
     applied_any = False
     applied_keys = []
     
-    # 0. Handle backend recovery rerun (SAFE: before any widgets)
+    # 0. Deferred navigation (safe) - MUST run before widgets
+    target = ss.get(NAV_DEFERRED_KEY)
+    if target:
+        ss[NAV_STATE_KEY] = target
+        ss[NAV_WIDGET_KEY] = target  # set widget default BEFORE st.radio instantiates
+        ss[NAV_DEFERRED_KEY] = None
+        applied_any = True
+        applied_keys.append(NAV_DEFERRED_KEY)
+        if IS_DEV:
+            print(f"[DEFERRED] Navigation to {target}")
+        return True
+    
+    # 1. Handle backend recovery rerun (SAFE: before any widgets)
     # This flag is set by handle_api_health_transition when endpoint recovers (no_response -> ok)
     if ss.get("_post_recovery_rerun"):
         ss.pop("_post_recovery_rerun")
@@ -796,25 +820,15 @@ def apply_pending_actions() -> bool:
         if IS_DEV:
             print("[DEFERRED] Applied auth payload")
     
-    # 1a. Apply pending navigation (from sidebar clicks or page buttons)
-    # Must run BEFORE _post_login_nav so post-login redirect can override if needed
-    if ss.get("_pending_nav_page"):
-        target_page = ss.pop("_pending_nav_page")
-        ss["nav_page"] = target_page
-        applied_any = True
-        applied_keys.append("_pending_nav_page")
-        if IS_DEV:
-            print(f"[DEFERRED] Pending nav to {target_page}")
-    
     # 2. Apply navigation redirect (after successful login/resume)
     if ss.get("_post_login_nav"):
         target_page = ss.pop("_post_login_nav")  # Pop removes it permanently
-        go_to(target_page)
-        # go_to() triggers rerun immediately, so we never reach this line
+        ss[NAV_DEFERRED_KEY] = target_page
         applied_any = True
         applied_keys.append("_post_login_nav")
         if IS_DEV:
             print(f"[DEFERRED] Navigation redirect to {target_page}")
+        return True
     
     # 3. Apply address payload (from preset selection or scenario load)
     if ss.get("_apply_address_payload"):
@@ -1390,29 +1404,47 @@ def render_sidebar() -> None:
                 return f"🔒 {p} (Coming Soon)"
             return p
         
-        # Render radio using nav_page itself as the widget state
+        # Initialize router default BEFORE radio is created
+        if ss.get(NAV_STATE_KEY) is None:
+            ss[NAV_STATE_KEY] = "Analyzer" if is_authenticated() else "Login"
+        
+        # Ensure widget key default is set BEFORE radio instantiates
+        if ss.get(NAV_WIDGET_KEY) is None:
+            ss[NAV_WIDGET_KEY] = ss[NAV_STATE_KEY]
+        elif ss.get(NAV_WIDGET_KEY) != ss.get(NAV_STATE_KEY):
+            # Only safe here because we are still BEFORE st.radio is instantiated in this run
+            ss[NAV_WIDGET_KEY] = ss[NAV_STATE_KEY]
+        
+        # Use the widget key for radio (NOT the router state key)
         selected = st.radio(
             "Go to",
             options=pages,
-            key="nav_page",
+            index=pages.index(ss[NAV_WIDGET_KEY]) if ss[NAV_WIDGET_KEY] in pages else 0,
+            key=NAV_WIDGET_KEY,
             format_func=_label,
         )
+        
+        # Update router state (NOT the widget key)
+        if selected != ss.get(NAV_STATE_KEY):
+            ss[NAV_STATE_KEY] = selected
         
         # Enforce auth gate + coming soon behavior deterministically
         if selected in coming_soon:
             st.info("This feature is coming soon.")
             last_valid = ss.get("_last_valid_page", "Login")
             go_to(last_valid)
-            return
+            return selected
         
         if selected in protected and not is_authenticated():
             st.warning("You must be logged in to access this page.")
             ss["_redirect_after_login"] = selected
             go_to("Login")
-            return
+            return selected
         
         # If we get here, the selection is valid — store it as last valid page
         ss["_last_valid_page"] = selected
+        
+        return selected
 
         st.markdown("### Behavior")
         st.checkbox(
@@ -2866,6 +2898,13 @@ def render_login() -> None:
     # CRITICAL: Clear widget keys BEFORE creating widgets to avoid Streamlit mutation error.
     # Streamlit owns widget keys once created; we can't modify them in the same run.
     # Pattern: Set flag on success/failure → rerun → clear keys before widget creation.
+    
+    # Clear password field on next run (safe because widgets not instantiated yet)
+    if ss.get("_clear_login_password"):
+        if "login_password" in ss:
+            del ss["login_password"]
+        ss["_clear_login_password"] = False
+    
     if ss.pop("_clear_login_fields", False):
         # Must remove keys BEFORE widgets instantiate
         ss.pop("login_password", None)
@@ -2881,6 +2920,17 @@ def render_login() -> None:
     if ss.get("_clear_resume_field"):
         ss.pop("resume_code_input", None)
         ss.pop("_clear_resume_field", None)
+    
+    # Show last login error if present
+    if ss.get("login_error"):
+        st.error(ss["login_error"])
+        if ss.get("login_error_detail"):
+            st.code(ss["login_error_detail"])
+        # Optional dismiss button
+        if st.button("Dismiss login error", key="dismiss_login_error"):
+            ss["login_error"] = None
+            ss["login_error_detail"] = None
+            st.rerun()
     
     st.header("Login")
 
@@ -2924,14 +2974,17 @@ def render_login() -> None:
                 else:
                     st.error("Login failed: incomplete session data.")
             else:
-                st.error(f"Login failed: {resp.status_code}")
                 # Clear password on failed login (keep email)
                 # Use deferred clearing to avoid StreamlitAPIException
-                ss["_clear_login_fields"] = True
+                detail_text = ""
                 try:
-                    st.code(resp.text, language="json")
+                    detail_text = resp.text
                 except Exception:
-                    pass
+                    detail_text = "No response detail"
+                
+                ss["login_error"] = f"Login failed: {resp.status_code}"
+                ss["login_error_detail"] = detail_text
+                ss["_clear_login_password"] = True
                 st.rerun()
 
     st.divider()
@@ -3619,12 +3672,12 @@ def main() -> None:
 
     # One-time initial routing decision (prevents router from fighting sidebar selection)
     if not ss.get("_nav_initialized"):
-        ss["nav_page"] = "Analyzer" if is_authenticated() else "Login"
+        ss[NAV_STATE_KEY] = "Analyzer" if is_authenticated() else "Login"
         ss["_nav_initialized"] = True
     
     # If we just authenticated and have an intended destination, go there once
     if is_authenticated() and ss.get("_redirect_after_login"):
-        ss["nav_page"] = ss["_redirect_after_login"]
+        ss[NAV_STATE_KEY] = ss["_redirect_after_login"]
         ss["_redirect_after_login"] = None
         st.rerun()
     
@@ -3634,7 +3687,7 @@ def main() -> None:
     # Log critical routing state on EVERY rerun to stdout (never logs tokens/emails)
     # This helps diagnose "stuck on wrong page" issues without exposing sensitive data
     # =========================================================================
-    _selected_page = ss.get("nav_page", "UNKNOWN")
+    _selected_page = ss.get(NAV_STATE_KEY, "UNKNOWN")
     _token_present = bool(ss.get("auth_token"))
     _user_present = bool(ss.get("current_user"))
     _user_role = None
@@ -3659,11 +3712,12 @@ def main() -> None:
     ping_backend_if_needed()
 
     # Render sidebar (updates nav_page in session_state)
-    render_sidebar()
+    nav_page = render_sidebar()
     
-    # Use session_state nav_page as single source of truth for navigation
+    # Use returned nav_page as single source of truth for navigation
     # This fixes the "button turns blue but page doesn't change" bug
-    nav_page = ss.get("nav_page", "Login")
+    if nav_page is None:
+        nav_page = ss.get(NAV_STATE_KEY, "Login")
 
     if nav_page == "Login":
         render_login()
