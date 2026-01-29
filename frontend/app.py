@@ -204,17 +204,15 @@ def init_state() -> None:
     init_auth_state()
     
     # Navigation - set deterministic defaults ONCE before widgets
-    ss.setdefault(NAV_STATE_KEY, "Login")              # Always default to Login on first run (router state)
+    ss.setdefault(NAV_STATE_KEY, None)                 # Router state (source of truth) - None means not yet initialized
     ss.setdefault(NAV_WIDGET_KEY, None)                # Radio widget key (DO NOT MUTATE AFTER WIDGET CREATION)
     ss.setdefault(NAV_DEFERRED_KEY, None)              # Deferred navigation target
     ss.setdefault(POST_LOGIN_NAV_KEY, None)            # Redirect target after successful login
-    ss.setdefault("_nav_initialized", False)          # one-time initial route selection
-    ss.setdefault("_last_valid_page", "Login")        # remember last valid page for reverting
+    ss.setdefault(CLEAR_LOGIN_PW_KEY, False)           # Flag to clear password on next run
 
     # Login form UX helpers - ensure keys exist with defaults
     ss.setdefault(LOGIN_EMAIL_KEY, "")
     ss.setdefault(LOGIN_PASSWORD_KEY, "")
-    ss.setdefault(CLEAR_LOGIN_PW_KEY, False)
     ss.setdefault("login_error", None)
     ss.setdefault("login_error_detail", None)
 
@@ -291,31 +289,31 @@ def apply_deferred_actions() -> bool:
 
     # 1) Clear login password safely (ONLY before widgets)
     if ss.get(CLEAR_LOGIN_PW_KEY):
-        ss.pop(LOGIN_PASSWORD_KEY, None)
+        ss[LOGIN_PASSWORD_KEY] = ""  # Clear password field safely before widget creation
         ss[CLEAR_LOGIN_PW_KEY] = False
         changed = True
 
     # 2) If user is logged out but persisted nav points to a protected page, force Login (prevents rerun loops)
     if not is_authenticated():
-        current = ss.get(NAV_STATE_KEY) or "Login"
-        if current in PROTECTED_PAGES:
+        current = ss.get(NAV_STATE_KEY)
+        if current and current in PROTECTED_PAGES:
             ss[NAV_STATE_KEY] = "Login"
             changed = True
 
-    # 3) Apply deferred navigation atomically
+    # 3) Handle post-login navigation redirect (do this BEFORE deferred nav)
+    if is_authenticated() and ss.get(POST_LOGIN_NAV_KEY):
+        target = ss.pop(POST_LOGIN_NAV_KEY)
+        ss[NAV_STATE_KEY] = target
+        changed = True
+        print(f"[ROUTING] post_login_redirect to {target}")
+
+    # 4) Apply deferred navigation atomically
     if ss.get(NAV_DEFERRED_KEY):
         target = ss.pop(NAV_DEFERRED_KEY)
         ss[NAV_STATE_KEY] = target
         changed = True
         # Log navigation change
         print(f"[ROUTING] nav_page={target} token_present={bool(ss.get('auth_token'))}")
-
-    # 4) Handle post-login navigation redirect
-    if is_authenticated() and ss.get(POST_LOGIN_NAV_KEY):
-        target = ss.pop(POST_LOGIN_NAV_KEY)
-        ss[NAV_STATE_KEY] = target
-        changed = True
-        print(f"[ROUTING] post_login_redirect to {target}")
 
     return changed
 
@@ -1420,15 +1418,14 @@ def render_sidebar() -> None:
         
         pages = ["Login", "Analyzer", "Portfolio", "Plans & Billing", "Projects (Coming Soon)", "Assets (Coming Soon)", "Property Search (Coming Soon)"]
         
-        # Ensure router state has a deterministic value
-        current = ss.get(NAV_STATE_KEY) or "Login"
-        if current not in pages:
-            current = "Login"
-            ss[NAV_STATE_KEY] = "Login"
+        # Compute safe current page from router state
+        current_page = ss.get(NAV_STATE_KEY)
+        if not current_page or current_page not in pages:
+            current_page = "Login"
         
-        current_index = pages.index(current)
+        current_index = pages.index(current_page)
         
-        # Render radio with current page selection
+        # Render radio with current page selection - NEVER modify NAV_WIDGET_KEY after this point
         selected = st.radio(
             "Go to",
             pages,
@@ -1438,25 +1435,29 @@ def render_sidebar() -> None:
         
         # CRITICAL: Guard against None selection (prevents NoneType error)
         if not selected:
-            return ss.get(NAV_STATE_KEY, "Login")
+            selected = current_page
         
         # Handle selection changes - use go_to() which never mutates widget keys
-        if selected != ss.get(NAV_STATE_KEY):
-            # Coming soon pages: just show info and rerun (snap back via index on next run)
+        if selected != current_page:
+            # Coming soon pages: show info and don't navigate
             if "(Coming Soon)" in selected:
                 st.info("Coming soon.")
-                st.rerun()
+                # Don't navigate - stay on current page
+                return
             
-            # Protected pages while logged out: send to Login and remember intent
+            # Protected pages while logged out: redirect to Login and remember intent
             if (selected in PROTECTED_PAGES) and (not is_authenticated()):
                 ss[POST_LOGIN_NAV_KEY] = selected
                 st.warning("You must be logged in to access this page.")
                 go_to("Login")
-            else:
-                # Normal navigation - use go_to() which safely defers
-                go_to(selected)
+                return
+            
+            # Normal navigation - use go_to() which safely defers
+            go_to(selected)
+            return
         
-        return ss.get(NAV_STATE_KEY, "Login")
+        # No action needed if selected == current_page
+        return
 
         st.markdown("### Behavior")
         st.checkbox(
@@ -2967,8 +2968,10 @@ def render_login() -> None:
                         track_event(ss, "login_success", {"user": user.get("email", "unknown")})
                     set_debug_cause("login")
                     
-                    # Navigate after successful login (AFTER form)
-                    request_nav("Analyzer")
+                    # Determine target page and navigate
+                    target = ss.get(POST_LOGIN_NAV_KEY) or "Analyzer"
+                    ss[POST_LOGIN_NAV_KEY] = None  # Clear the redirect target
+                    go_to(target)
                 else:
                     st.error("Login failed: incomplete session data.")
             else:
@@ -3670,16 +3673,10 @@ def main() -> None:
         if is_logged_in() and not ss.get("capabilities"):
             fetch_and_cache_capabilities()
 
-    # One-time initial routing decision
-    if not ss.get("_nav_initialized"):
+    # Initialize NAV_STATE_KEY if not set (first run or after state clear)
+    if ss.get(NAV_STATE_KEY) is None:
         initial_page = "Analyzer" if is_authenticated() else "Login"
-        if ss.get(NAV_STATE_KEY) != initial_page:
-            ss[NAV_STATE_KEY] = initial_page
-        ss["_nav_initialized"] = True
-    
-    # If we just authenticated and have an intended destination, navigate there
-    # This is handled via POST_LOGIN_NAV_KEY in apply_deferred_actions()
-    # No need for duplicate logic here - deferred actions already applied above
+        ss[NAV_STATE_KEY] = initial_page
     
     # =========================================================================
     # SAFE STARTUP ROUTING DIAGNOSTICS (PRODUCTION-SAFE)
@@ -3712,27 +3709,31 @@ def main() -> None:
     ping_backend_if_needed()
 
     # Render sidebar (creates widgets)
-    nav_choice = render_sidebar()
-    page = st.session_state.get(NAV_STATE_KEY, "Login")
+    render_sidebar()
     
-    # Route strictly on router state (page), not the radio return value
+    # Get current page from router state
+    page = ss.get(NAV_STATE_KEY) or "Login"
+    
+    # Route strictly on router state
+    # Protected pages already handled by sidebar - if we reach here and user is not authenticated
+    # on a protected page, sidebar has already initiated redirect
     if page == "Login":
         render_login()
     elif page == "Analyzer":
         if not is_authenticated():
-            st.session_state[POST_LOGIN_NAV_KEY] = "Analyzer"
             go_to("Login")
-        render_analyzer()
+        else:
+            render_analyzer()
     elif page == "Portfolio":
         if not is_authenticated():
-            st.session_state[POST_LOGIN_NAV_KEY] = "Portfolio"
             go_to("Login")
-        render_portfolio_and_trash()
+        else:
+            render_portfolio_and_trash()
     elif page == "Plans & Billing":
         if not is_authenticated():
-            st.session_state[POST_LOGIN_NAV_KEY] = "Plans & Billing"
             go_to("Login")
-        render_plans_billing()
+        else:
+            render_plans_billing()
     elif page == "Property Search":
         render_property_search()
     elif page == "Assets":
