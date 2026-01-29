@@ -59,8 +59,8 @@ if IS_DEV:
 # --------------------------------------------------------------------
 
 # Navigation state keys (separate widget key from router state)
-NAV_STATE_KEY = "nav_page_state"           # router source of truth (NOT a widget key)
-NAV_WIDGET_KEY = "nav_page_radio"          # sidebar radio widget key
+NAV_STATE_KEY = "nav_page"                 # router source of truth (NOT a widget key)
+NAV_WIDGET_KEY = "nav_page_radio"          # sidebar radio widget key (DO NOT WRITE AFTER WIDGET CREATION)
 NAV_DEFERRED_KEY = "_nav_to"               # pending nav target applied next run
 POST_LOGIN_NAV_KEY = "_post_login_nav"     # where to go after login
 CLEAR_LOGIN_PW_KEY = "_clear_login_pw"     # pending password clear applied next run
@@ -153,7 +153,7 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 # --------------------------------------------------------------------
 
 KEYS_OF_INTEREST = [
-    "nav_page_state",
+    "nav_page",
     "nav_page_radio",
     "_nav_to",
     "_post_login_nav",
@@ -204,9 +204,9 @@ def init_state() -> None:
     init_auth_state()
     
     # Navigation - set deterministic defaults ONCE before widgets
-    ss.setdefault(NAV_STATE_KEY, "Login")              # Always default to Login on first run
-    ss.setdefault(NAV_WIDGET_KEY, None)
-    ss.setdefault(NAV_DEFERRED_KEY, None)
+    ss.setdefault(NAV_STATE_KEY, "Login")              # Always default to Login on first run (router state)
+    ss.setdefault(NAV_WIDGET_KEY, None)                # Radio widget key (DO NOT MUTATE AFTER WIDGET CREATION)
+    ss.setdefault(NAV_DEFERRED_KEY, None)              # Deferred navigation target
     ss.setdefault(POST_LOGIN_NAV_KEY, None)            # Redirect target after successful login
     ss.setdefault("_nav_initialized", False)          # one-time initial route selection
     ss.setdefault("_last_valid_page", "Login")        # remember last valid page for reverting
@@ -268,11 +268,12 @@ ss = st.session_state
 # --------------------------------------------------------------------
 
 def go_to(page: str) -> None:
-    """Defer navigation so state changes apply BEFORE widgets exist."""
+    """Request navigation via deferred action - NEVER writes widget keys."""
     ss = st.session_state
     current = ss.get(NAV_STATE_KEY)
     if page == current:
         return
+    # CRITICAL: Only set deferred key, never mutate NAV_WIDGET_KEY or NAV_STATE_KEY here
     ss[NAV_DEFERRED_KEY] = page
     st.rerun()
 
@@ -290,7 +291,7 @@ def apply_deferred_actions() -> bool:
 
     # 1) Clear login password safely (ONLY before widgets)
     if ss.get(CLEAR_LOGIN_PW_KEY):
-        ss[LOGIN_PASSWORD_KEY] = ""
+        ss.pop(LOGIN_PASSWORD_KEY, None)
         ss[CLEAR_LOGIN_PW_KEY] = False
         changed = True
 
@@ -299,15 +300,22 @@ def apply_deferred_actions() -> bool:
         current = ss.get(NAV_STATE_KEY) or "Login"
         if current in PROTECTED_PAGES:
             ss[NAV_STATE_KEY] = "Login"
-            ss[NAV_WIDGET_KEY] = "Login"
             changed = True
 
-    # 3) Apply deferred navigation atomically (router + radio)
+    # 3) Apply deferred navigation atomically
     if ss.get(NAV_DEFERRED_KEY):
         target = ss.pop(NAV_DEFERRED_KEY)
         ss[NAV_STATE_KEY] = target
-        ss[NAV_WIDGET_KEY] = target
         changed = True
+        # Log navigation change
+        print(f"[ROUTING] nav_page={target} token_present={bool(ss.get('auth_token'))}")
+
+    # 4) Handle post-login navigation redirect
+    if is_authenticated() and ss.get(POST_LOGIN_NAV_KEY):
+        target = ss.pop(POST_LOGIN_NAV_KEY)
+        ss[NAV_STATE_KEY] = target
+        changed = True
+        print(f"[ROUTING] post_login_redirect to {target}")
 
     return changed
 
@@ -813,17 +821,9 @@ def apply_pending_actions() -> bool:
     applied_any = False
     applied_keys = []
     
-    # 0. Deferred navigation (safe) - MUST run before widgets
-    target = ss.get(NAV_DEFERRED_KEY)
-    if target:
-        ss[NAV_STATE_KEY] = target
-        ss[NAV_WIDGET_KEY] = target  # set widget default BEFORE st.radio instantiates
-        ss[NAV_DEFERRED_KEY] = None
-        applied_any = True
-        applied_keys.append(NAV_DEFERRED_KEY)
-        if IS_DEV:
-            print(f"[DEFERRED] Navigation to {target}")
-        return True
+    # 0. Deferred navigation - now handled by apply_deferred_actions()
+    # This function (apply_pending_actions) should not handle navigation anymore
+    # Skip if nav deferred (let apply_deferred_actions handle it)
     
     # 1. Handle backend recovery rerun (SAFE: before any widgets)
     # This flag is set by handle_api_health_transition when endpoint recovers (no_response -> ok)
@@ -863,15 +863,8 @@ def apply_pending_actions() -> bool:
         if IS_DEV:
             print("[DEFERRED] Applied auth payload")
     
-    # 2. Apply navigation redirect (after successful login/resume)
-    if ss.get(POST_LOGIN_NAV_KEY):
-        target_page = ss.pop(POST_LOGIN_NAV_KEY)  # Pop removes it permanently
-        ss[NAV_DEFERRED_KEY] = target_page
-        applied_any = True
-        applied_keys.append(POST_LOGIN_NAV_KEY)
-        if IS_DEV:
-            print(f"[DEFERRED] Navigation redirect to {target_page}")
-        return True
+    # 2. Navigation redirect after login - now handled by apply_deferred_actions()
+    # Skip this section (handled earlier in the render cycle)
     
     # 3. Apply address payload (from preset selection or scenario load)
     if ss.get("_apply_address_payload"):
@@ -1435,6 +1428,7 @@ def render_sidebar() -> None:
         
         current_index = pages.index(current)
         
+        # Render radio with current page selection
         selected = st.radio(
             "Go to",
             pages,
@@ -1442,26 +1436,25 @@ def render_sidebar() -> None:
             key=NAV_WIDGET_KEY,
         )
         
-        # Handle selection changes WITHOUT direct mutation of router state
+        # CRITICAL: Guard against None selection (prevents NoneType error)
+        if not selected:
+            return ss.get(NAV_STATE_KEY, "Login")
+        
+        # Handle selection changes - use go_to() which never mutates widget keys
         if selected != ss.get(NAV_STATE_KEY):
-            # Coming soon pages: snap back (no navigation)
+            # Coming soon pages: just show info and rerun (snap back via index on next run)
             if "(Coming Soon)" in selected:
                 st.info("Coming soon.")
-                ss[NAV_DEFERRED_KEY] = ss.get(NAV_STATE_KEY, "Login")
-                ss[NAV_WIDGET_KEY] = ss.get(NAV_STATE_KEY, "Login")
                 st.rerun()
             
             # Protected pages while logged out: send to Login and remember intent
             if (selected in PROTECTED_PAGES) and (not is_authenticated()):
                 ss[POST_LOGIN_NAV_KEY] = selected
-                ss[NAV_WIDGET_KEY] = "Login"
-                ss[NAV_DEFERRED_KEY] = "Login"
                 st.warning("You must be logged in to access this page.")
-                st.rerun()
-            
-            # Normal navigation
-            ss[NAV_DEFERRED_KEY] = selected
-            st.rerun()
+                go_to("Login")
+            else:
+                # Normal navigation - use go_to() which safely defers
+                go_to(selected)
         
         return ss.get(NAV_STATE_KEY, "Login")
 
@@ -1504,8 +1497,9 @@ def render_sidebar() -> None:
                 
                 # Navigation debug info
                 st.markdown("##### Navigation State")
-                st.text(f"nav_page: {ss.get('nav_page', 'NONE')}")
-                st.text(f"_nav_radio_display: {ss.get('_nav_radio_display', 'NONE')}")
+                st.text(f"nav_page: {ss.get(NAV_STATE_KEY, 'NONE')}")
+                st.text(f"nav_page_radio: {ss.get(NAV_WIDGET_KEY, 'NONE')}")
+                st.text(f"_nav_to: {ss.get(NAV_DEFERRED_KEY, 'NONE')}")
                 st.text(f"is_authenticated: {is_authenticated()}")
                 st.text(f"auth_token present: {'Yes' if ss.get('auth_token') else 'No'}")
                 st.text(f"current_user present: {'Yes' if ss.get('current_user') else 'No'}")
@@ -2914,13 +2908,8 @@ def safe_delta(val1: Optional[float], val2: Optional[float], is_percentage: bool
 
 
 def render_login() -> None:
-    # CRITICAL: Clearing/errors handled OUTSIDE form to avoid rerun before submit button
-    
-    # Apply pending login password clear BEFORE any widgets
-    # This is safe because it runs before st.form and text_input creation
-    if ss.get(CLEAR_LOGIN_PW_KEY):
-        ss[LOGIN_PASSWORD_KEY] = ""
-        ss[CLEAR_LOGIN_PW_KEY] = False
+    # CRITICAL: Password clearing handled by apply_deferred_actions() BEFORE widgets
+    # This function should NOT clear password - it happens before this function is called
     
     # Show last login error if present (BEFORE form)
     if ss.get("login_error"):
