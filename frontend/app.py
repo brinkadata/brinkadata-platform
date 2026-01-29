@@ -59,9 +59,12 @@ if IS_DEV:
 # --------------------------------------------------------------------
 
 # Navigation state keys (separate widget key from router state)
-NAV_STATE_KEY = "nav_page"              # router state (NOT used as a widget key)
-NAV_WIDGET_KEY = "nav_page_radio"       # sidebar radio widget key (ONLY used by st.radio)
-NAV_DEFERRED_KEY = "_nav_to"            # deferred programmatic navigation target
+NAV_STATE_KEY = "nav_page"                 # router state (NOT a widget key)
+NAV_WIDGET_KEY = "nav_page_radio"         # sidebar radio widget key
+NAV_DEFERRED_KEY = "_nav_to"              # pending nav target applied next run
+CLEAR_LOGIN_PW_KEY = "_clear_login_pw"    # pending password clear applied next run
+LOGIN_EMAIL_KEY = "login_email"
+LOGIN_PASSWORD_KEY = "login_password"
 
 # --------------------------------------------------------------------
 # Custom CSS for theme
@@ -194,19 +197,18 @@ def init_state() -> None:
     # This ensures auth keys are properly initialized on every rerun
     init_auth_state()
     
-    # Navigation
-    # nav_page is the single source of truth for routing (sidebar radio uses key="nav_page")
-    ss.setdefault(NAV_STATE_KEY, None)
+    # Navigation - set deterministic defaults ONCE before widgets
+    ss.setdefault(NAV_STATE_KEY, "Login")
     ss.setdefault(NAV_WIDGET_KEY, None)
     ss.setdefault(NAV_DEFERRED_KEY, None)
     ss.setdefault("_nav_initialized", False)          # one-time initial route selection
     ss.setdefault("_redirect_after_login", None)      # protected page intent when logged out
     ss.setdefault("_last_valid_page", "Login")        # remember last valid page for reverting
 
-    # Login form UX helpers
-    ss.setdefault("login_email", "")
-    ss.setdefault("login_password", "")
-    ss.setdefault("_clear_login_password", False)
+    # Login form UX helpers - ensure keys exist with defaults
+    ss.setdefault(LOGIN_EMAIL_KEY, "")
+    ss.setdefault(LOGIN_PASSWORD_KEY, "")
+    ss.setdefault(CLEAR_LOGIN_PW_KEY, False)
     ss.setdefault("login_error", None)
     ss.setdefault("login_error_detail", None)
 
@@ -259,14 +261,31 @@ ss = st.session_state
 # Navigation helper (single source of truth)
 # --------------------------------------------------------------------
 
-def go_to(page: str) -> None:
-    """Programmatic navigation that never mutates widget keys after instantiation.
-    Sets a deferred target and triggers a rerun. The deferred target is applied
-    early in main() before the sidebar radio widget is created.
+def request_nav(page: str) -> None:
+    """Defer nav; apply at top of next run BEFORE widgets."""
+    st.session_state[NAV_DEFERRED_KEY] = page
+    st.rerun()
+
+def apply_deferred_actions() -> bool:
+    """Must be called at TOP of main() before any widgets render.
+    Returns True if any action was applied.
     """
     ss = st.session_state
-    ss[NAV_DEFERRED_KEY] = page
-    st.rerun()
+    changed = False
+
+    # Apply pending login password clear BEFORE widgets
+    if ss.get(CLEAR_LOGIN_PW_KEY):
+        ss[LOGIN_PASSWORD_KEY] = ""
+        ss[CLEAR_LOGIN_PW_KEY] = False
+        changed = True
+
+    # Apply pending navigation BEFORE widgets
+    if ss.get(NAV_DEFERRED_KEY):
+        ss[NAV_STATE_KEY] = ss[NAV_DEFERRED_KEY]
+        del ss[NAV_DEFERRED_KEY]
+        changed = True
+
+    return changed
 
 
 # --------------------------------------------------------------------
@@ -1190,7 +1209,7 @@ def render_sidebar() -> None:
                 clear_auth()
                 
                 # Navigate to login page using deterministic router
-                go_to("Login")
+                request_nav("Login")
         
         # Auth Smoke Test (visible when authenticated)
         if auth_token:
@@ -1404,47 +1423,47 @@ def render_sidebar() -> None:
                 return f"🔒 {p} (Coming Soon)"
             return p
         
-        # Initialize router default BEFORE radio is created
-        if ss.get(NAV_STATE_KEY) is None:
-            ss[NAV_STATE_KEY] = "Analyzer" if is_authenticated() else "Login"
+        # Get current router state
+        current_page = ss.get(NAV_STATE_KEY, "Login")
         
-        # Ensure widget key default is set BEFORE radio instantiates
-        if ss.get(NAV_WIDGET_KEY) is None:
-            ss[NAV_WIDGET_KEY] = ss[NAV_STATE_KEY]
-        elif ss.get(NAV_WIDGET_KEY) != ss.get(NAV_STATE_KEY):
-            # Only safe here because we are still BEFORE st.radio is instantiated in this run
-            ss[NAV_WIDGET_KEY] = ss[NAV_STATE_KEY]
+        # Compute index based on current router state
+        index = pages.index(current_page) if current_page in pages else 0
         
-        # Use the widget key for radio (NOT the router state key)
+        # Render radio with dedicated widget key
         selected = st.radio(
             "Go to",
             options=pages,
-            index=pages.index(ss[NAV_WIDGET_KEY]) if ss[NAV_WIDGET_KEY] in pages else 0,
+            index=index,
             key=NAV_WIDGET_KEY,
             format_func=_label,
         )
         
-        # Update router state (NOT the widget key)
-        if selected != ss.get(NAV_STATE_KEY):
-            ss[NAV_STATE_KEY] = selected
+        # Determine target page (map display selection to actual page)
+        target_page = selected
         
-        # Enforce auth gate + coming soon behavior deterministically
-        if selected in coming_soon:
-            st.info("This feature is coming soon.")
-            last_valid = ss.get("_last_valid_page", "Login")
-            go_to(last_valid)
-            return selected
+        # Check if navigation is needed
+        if target_page != current_page:
+            # Enforce auth gate + coming soon behavior
+            if target_page in coming_soon:
+                st.info("This feature is coming soon.")
+                last_valid = ss.get("_last_valid_page", "Login")
+                request_nav(last_valid)
+                return current_page
+            
+            if target_page in protected and not is_authenticated():
+                st.warning("You must be logged in to access this page.")
+                ss["_redirect_after_login"] = target_page
+                request_nav("Login")
+                return current_page
+            
+            # Valid selection - request navigation
+            request_nav(target_page)
+            return current_page
         
-        if selected in protected and not is_authenticated():
-            st.warning("You must be logged in to access this page.")
-            ss["_redirect_after_login"] = selected
-            go_to("Login")
-            return selected
+        # If we get here, selection is valid and unchanged - store as last valid page
+        ss["_last_valid_page"] = current_page
         
-        # If we get here, the selection is valid — store it as last valid page
-        ss["_last_valid_page"] = selected
-        
-        return selected
+        return current_page
 
         st.markdown("### Behavior")
         st.checkbox(
@@ -2895,33 +2914,9 @@ def safe_delta(val1: Optional[float], val2: Optional[float], is_percentage: bool
 
 
 def render_login() -> None:
-    # CRITICAL: Clear widget keys BEFORE creating widgets to avoid Streamlit mutation error.
-    # Streamlit owns widget keys once created; we can't modify them in the same run.
-    # Pattern: Set flag on success/failure → rerun → clear keys before widget creation.
+    # CRITICAL: Clearing/errors handled OUTSIDE form to avoid rerun before submit button
     
-    # Clear password field on next run (safe because widgets not instantiated yet)
-    if ss.get("_clear_login_password"):
-        if "login_password" in ss:
-            del ss["login_password"]
-        ss["_clear_login_password"] = False
-    
-    if ss.pop("_clear_login_fields", False):
-        # Must remove keys BEFORE widgets instantiate
-        ss.pop("login_password", None)
-        # Optional: also clear email on failure (currently we keep email for retry convenience)
-        # ss.pop("login_email", None)
-    
-    if ss.get("_clear_register_fields"):
-        ss.pop("register_email", None)
-        ss.pop("register_password", None)
-        ss.pop("register_account_name", None)
-        ss.pop("_clear_register_fields", None)
-    
-    if ss.get("_clear_resume_field"):
-        ss.pop("resume_code_input", None)
-        ss.pop("_clear_resume_field", None)
-    
-    # Show last login error if present
+    # Show last login error if present (BEFORE form)
     if ss.get("login_error"):
         st.error(ss["login_error"])
         if ss.get("login_error_detail"):
@@ -2932,22 +2927,34 @@ def render_login() -> None:
             ss["login_error_detail"] = None
             st.rerun()
     
+    # Clear register/resume fields if flagged (BEFORE forms)
+    if ss.get("_clear_register_fields"):
+        ss.pop("register_email", None)
+        ss.pop("register_password", None)
+        ss.pop("register_account_name", None)
+        ss.pop("_clear_register_fields", None)
+    
+    if ss.get("_clear_resume_field"):
+        ss.pop("resume_code_input", None)
+        ss.pop("_clear_resume_field", None)
+    
     st.header("Login")
 
+    # Login form - NO st.rerun() before submit button
     with st.form("login_form"):
-        email = st.text_input("Email", key="login_email")
-        password = st.text_input("Password", type="password", key="login_password")
+        email = st.text_input("Email", key=LOGIN_EMAIL_KEY)
+        password = st.text_input("Password", type="password", key=LOGIN_PASSWORD_KEY)
         submitted = st.form_submit_button("Login")
 
-        if submitted:
-            if not email or not password:
-                st.error("Please enter email and password.")
-                return
-
+    # Process submission AFTER form (outside with block)
+    if submitted:
+        if not email or not password:
+            st.error("Please enter email and password.")
+        else:
             resp = api_request("POST", "/auth/login", json={"email": email, "password": password}, timeout=10)
             if resp is None:
-                return
-            if resp.status_code == 200:
+                pass
+            elif resp.status_code == 200:
                 data = resp.json()
                 token = data.get("access_token")
                 user = data.get("user", {})
@@ -2958,24 +2965,19 @@ def render_login() -> None:
                     # Use centralized auth setter
                     set_auth(token, user, session_id, refresh_token)
                     
-                    # Set deferred navigation to Analyzer
-                    ss["_post_login_nav"] = "Analyzer"
-                    if IS_DEV and 'mark_key_set' in globals():
-                        mark_key_set(ss, "_post_login_nav", "login_success")
+                    # Fetch and cache capabilities after successful login
+                    fetch_and_cache_capabilities()
+                    
+                    if IS_DEV and 'track_event' in globals():
                         track_event(ss, "login_success", {"user": user.get("email", "unknown")})
                     set_debug_cause("login")
                     
-                    # Set flag to clear login form fields on next run (safe pattern)
-                    ss["_clear_login_fields"] = True
-                    
-                    # Fetch and cache capabilities after successful login
-                    fetch_and_cache_capabilities()
-                    st.rerun()
+                    # Navigate after successful login (AFTER form)
+                    request_nav("Analyzer")
                 else:
                     st.error("Login failed: incomplete session data.")
             else:
-                # Clear password on failed login (keep email)
-                # Use deferred clearing to avoid StreamlitAPIException
+                # Failed login - store error and clear password (AFTER form)
                 detail_text = ""
                 try:
                     detail_text = resp.text
@@ -2984,23 +2986,24 @@ def render_login() -> None:
                 
                 ss["login_error"] = f"Login failed: {resp.status_code}"
                 ss["login_error_detail"] = detail_text
-                ss["_clear_login_password"] = True
+                ss[CLEAR_LOGIN_PW_KEY] = True
                 st.rerun()
 
     st.divider()
     st.subheader("Register New Account")
 
+    # Register form - NO st.rerun() before submit button
     with st.form("register_form"):
         reg_email = st.text_input("Email", key="register_email")
         reg_password = st.text_input("Password", type="password", key="register_password")
         reg_account_name = st.text_input("Account Name", key="register_account_name")
         reg_submitted = st.form_submit_button("Register")
 
-        if reg_submitted:
-            if not reg_email or not reg_password or not reg_account_name:
-                st.error("Please fill in all registration fields.")
-                return
-
+    # Process submission AFTER form (outside with block)
+    if reg_submitted:
+        if not reg_email or not reg_password or not reg_account_name:
+            st.error("Please fill in all registration fields.")
+        else:
             # Call register endpoint
             resp = api_request(
                 "POST",
@@ -3009,9 +3012,8 @@ def render_login() -> None:
                 timeout=10
             )
             if resp is None:
-                return
-
-            if resp.status_code in (200, 201):
+                pass
+            elif resp.status_code in (200, 201):
                 st.success("Registration successful! Logging you in...")
                 # Auto-login with same credentials
                 login_resp = api_request(
@@ -3028,19 +3030,18 @@ def render_login() -> None:
                         # Use centralized auth setter
                         set_auth(token, user, session_id, refresh_token)
                         
-                        # Set deferred navigation to Analyzer
-                        ss["_post_login_nav"] = "Analyzer"
-                        if IS_DEV and 'mark_key_set' in globals():
-                            mark_key_set(ss, "_post_login_nav", "register_success")
+                        # Fetch and cache capabilities after successful auto-login
+                        fetch_and_cache_capabilities()
+                        
+                        if IS_DEV and 'track_event' in globals():
                             track_event(ss, "register_success", {"user": user.get("email", "unknown")})
                         set_debug_cause("register")
                         
-                        # Set flag to clear register form fields on next run (safe pattern)
+                        # Set flag to clear register form fields on next run
                         ss["_clear_register_fields"] = True
                         
-                        # Fetch and cache capabilities after successful auto-login
-                        fetch_and_cache_capabilities()
-                        st.rerun()
+                        # Navigate after successful registration (AFTER form)
+                        request_nav("Analyzer")
                     else:
                         st.info("Registered. Please log in above.")
                 else:
@@ -3057,15 +3058,16 @@ def render_login() -> None:
     st.caption("Already have a resume code? Enter it below to continue your session.")
     st.caption("⚠️ **Important**: Resume codes only work for browser refresh/rerun. If you logged out, the backend session is revoked and resume will fail. You must login again.")
 
+    # Resume form - NO st.rerun() before submit button
     with st.form("resume_form"):
         resume_code = st.text_input("Resume Code", key="resume_code_input", placeholder="XXXX-XXXX")
         resume_submitted = st.form_submit_button("Resume")
 
-        if resume_submitted:
-            if not resume_code:
-                st.error("Please enter a resume code.")
-                return
-
+    # Process submission AFTER form (outside with block)
+    if resume_submitted:
+        if not resume_code:
+            st.error("Please enter a resume code.")
+        else:
             # Call resume endpoint
             resp = api_request(
                 "POST",
@@ -3074,9 +3076,8 @@ def render_login() -> None:
                 timeout=10
             )
             if resp is None:
-                return
-
-            if resp.status_code == 200:
+                pass
+            elif resp.status_code == 200:
                 data = resp.json()
                 token = data.get("access_token")
                 user = data.get("user", {})
@@ -3087,19 +3088,18 @@ def render_login() -> None:
                     # Use centralized auth setter
                     set_auth(token, user, session_id, refresh_token)
                     
-                    # Set deferred navigation to Analyzer
-                    ss["_post_login_nav"] = "Analyzer"
-                    if IS_DEV and 'mark_key_set' in globals():
-                        mark_key_set(ss, "_post_login_nav", "resume_success")
+                    # Fetch and cache capabilities after successful resume
+                    fetch_and_cache_capabilities()
+                    
+                    if IS_DEV and 'track_event' in globals():
                         track_event(ss, "resume_success", {"user": user.get("email", "unknown")})
                     set_debug_cause("resume")
                     
-                    # Set flag to clear resume form field on next run (safe pattern)
+                    # Set flag to clear resume form field on next run
                     ss["_clear_resume_field"] = True
                     
-                    # Fetch and cache capabilities after successful resume
-                    fetch_and_cache_capabilities()
-                    st.rerun()
+                    # Navigate after successful resume (AFTER form)
+                    request_nav("Analyzer")
                 else:
                     st.error("Resume failed: incomplete session data.")
             else:
@@ -3308,7 +3308,7 @@ def render_property_search() -> None:
                                 "state": selected.get("state", ""),
                                 "zip_code": selected.get("zip", ""),
                             }
-                            go_to("Analyzer")
+                            request_nav("Analyzer")
                     
                     with col_action2:
                         # Save as Asset (gated by asset:manage)
@@ -3462,7 +3462,7 @@ def render_assets() -> None:
                             "state": asset.get("state", ""),
                             "zip_code": asset.get("zip_code", ""),
                         }
-                        go_to("Analyzer")
+                        request_nav("Analyzer")
                 else:
                     st.button("🔒 Analyze this Asset", key="asset_analyze_btn_locked", disabled=True)
                     st.caption("⚠️ Requires analysis permissions. Available in all plans.")
@@ -3650,11 +3650,16 @@ def main() -> None:
             update_fingerprint(ss)
         # If not changed, no log (eliminates noise)
     
+    # Apply deferred actions FIRST (before any widgets render)
+    # This handles navigation and login password clearing
+    if apply_deferred_actions():
+        # Actions applied; continue rendering with updated state
+        pass
+    
+    # Apply other pending actions (auth payload, address prefill, portfolio refresh, etc.)
     if apply_pending_actions():
-        # At least one deferred action was applied.
-        # Rerun ONCE so widgets are created with correct session_state.
-        # No infinite loop: actions are popped (consumed) on first application.
-        st.rerun()
+        # Actions applied; continue rendering with updated state
+        pass
     
     # Session rehydration guard
     # On first load, check if there's a persisted session (future: cookies, localStorage, etc.)
@@ -3670,16 +3675,20 @@ def main() -> None:
         if is_logged_in() and not ss.get("capabilities"):
             fetch_and_cache_capabilities()
 
-    # One-time initial routing decision (prevents router from fighting sidebar selection)
+    # One-time initial routing decision
     if not ss.get("_nav_initialized"):
-        ss[NAV_STATE_KEY] = "Analyzer" if is_authenticated() else "Login"
+        initial_page = "Analyzer" if is_authenticated() else "Login"
+        if ss.get(NAV_STATE_KEY) != initial_page:
+            ss[NAV_STATE_KEY] = initial_page
         ss["_nav_initialized"] = True
     
-    # If we just authenticated and have an intended destination, go there once
+    # If we just authenticated and have an intended destination, navigate there
     if is_authenticated() and ss.get("_redirect_after_login"):
-        ss[NAV_STATE_KEY] = ss["_redirect_after_login"]
+        intended = ss["_redirect_after_login"]
         ss["_redirect_after_login"] = None
-        st.rerun()
+        if ss.get(NAV_STATE_KEY) != intended:
+            request_nav(intended)
+            return
     
     # =========================================================================
     # SAFE STARTUP ROUTING DIAGNOSTICS (PRODUCTION-SAFE)
@@ -3725,7 +3734,7 @@ def main() -> None:
         # Hard auth gate: Analyzer must never render unless authenticated
         if not is_authenticated():
             st.warning("You must log in to access this page.")
-            go_to("Login")
+            request_nav("Login")
             return
         render_analyzer()
     elif nav_page == "Portfolio":
@@ -3738,7 +3747,7 @@ def main() -> None:
         render_assets()
     else:
         # Fallback to Login for unknown pages
-        go_to("Login")
+        request_nav("Login")
         return
 
 
