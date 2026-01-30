@@ -1416,16 +1416,24 @@ def render_sidebar() -> None:
 
         st.markdown("### Navigation")
         
-        pages = ["Login", "Analyzer", "Portfolio", "Plans & Billing", "Projects (Coming Soon)", "Assets (Coming Soon)", "Property Search (Coming Soon)"]
+        # A) Build OPTIONS dynamically based on auth state
+        if is_authenticated():
+            pages = ["Analyzer", "Portfolio", "Plans & Billing", "Projects (Coming Soon)", "Assets (Coming Soon)", "Property Search (Coming Soon)"]
+        else:
+            pages = ["Login", "Analyzer", "Portfolio", "Plans & Billing", "Projects (Coming Soon)", "Assets (Coming Soon)", "Property Search (Coming Soon)"]
         
-        # Compute safe current page from router state
+        # B) Always compute current_page from router state BEFORE rendering radio
         current_page = ss.get(NAV_STATE_KEY)
-        if not current_page or current_page not in pages:
-            current_page = "Login"
+        if not current_page:
+            current_page = "Analyzer" if is_authenticated() else "Login"
         
+        # If current_page not in options (e.g., was on Login but now authenticated), reset
+        if current_page not in pages:
+            current_page = "Analyzer" if is_authenticated() else "Login"
+            ss[NAV_STATE_KEY] = current_page  # OK to set router state BEFORE widgets
+        
+        # C) Render radio with stable index
         current_index = pages.index(current_page)
-        
-        # Render radio with current page selection - NEVER modify NAV_WIDGET_KEY after this point
         selected = st.radio(
             "Go to",
             pages,
@@ -1433,7 +1441,8 @@ def render_sidebar() -> None:
             key=NAV_WIDGET_KEY,
         )
         
-        # CRITICAL: Guard against None selection (prevents NoneType error)
+        # D) After radio renders: handle selection without mutating NAV_WIDGET_KEY
+        # Guard against None selection
         if not selected:
             selected = current_page
         
@@ -1442,7 +1451,7 @@ def render_sidebar() -> None:
             # Coming soon pages: show info and don't navigate
             if "(Coming Soon)" in selected:
                 st.info("Coming soon.")
-                # Don't navigate - stay on current page
+                # Return current_page to prevent navigation
                 return
             
             # Protected pages while logged out: redirect to Login and remember intent
@@ -2912,16 +2921,64 @@ def render_login() -> None:
     # CRITICAL: Password clearing handled by apply_deferred_actions() BEFORE widgets
     # This function should NOT clear password - it happens before this function is called
     
-    # Show last login error if present (BEFORE form)
+    # F) If authenticated, hide login UI - show logout/session controls only
+    if is_authenticated():
+        st.info("You are already logged in.")
+        
+        st.markdown("### Session Management")
+        
+        # Show current user info
+        current_user = ss.get("current_user")
+        if current_user and isinstance(current_user, dict):
+            email = current_user.get("email", "Unknown")
+            role = current_user.get("role", "member").title()
+            st.caption(f"**User:** {email}")
+            st.caption(f"**Role:** {role}")
+        
+        # Logout button
+        if st.button("🚪 Logout", key="logout_from_login_page", use_container_width=True):
+            # Call backend logout if session exists
+            session_id = ss.get("session_id")
+            refresh_token = ss.get("refresh_token")
+            
+            if session_id and refresh_token:
+                try:
+                    api_request(
+                        "POST",
+                        "/auth/logout",
+                        json={"session_id": session_id, "refresh_token": refresh_token},
+                        timeout=5
+                    )
+                except Exception:
+                    pass  # Continue logout even if backend call fails
+            
+            # Clear auth state using centralized helper
+            clear_auth()
+            
+            # Navigate to login page and rerun
+            go_to("Login")
+        
+        st.caption("Navigate using the sidebar to access other pages.")
+        return  # Stop rendering login forms
+    
+    # Auto-clear login error if user changes email/password (improves UX)
+    # Store last attempted credentials to detect changes
+    last_login_email = ss.get("_last_login_email", "")
+    last_login_password = ss.get("_last_login_password", "")
+    current_login_email = ss.get(LOGIN_EMAIL_KEY, "")
+    current_login_password = ss.get(LOGIN_PASSWORD_KEY, "")
+    
+    # If fields changed, clear error automatically
+    if (current_login_email != last_login_email or current_login_password != last_login_password):
+        if ss.get("login_error"):
+            ss["login_error"] = None
+            ss["login_error_detail"] = None
+    
+    # Show last login error if present (BEFORE form) - no dismiss button
     if ss.get("login_error"):
         st.error(ss["login_error"])
         if ss.get("login_error_detail"):
             st.code(ss["login_error_detail"])
-        # Optional dismiss button
-        if st.button("Dismiss login error", key="dismiss_login_error"):
-            ss["login_error"] = None
-            ss["login_error_detail"] = None
-            st.rerun()
     
     # Clear register/resume fields if flagged (BEFORE forms)
     if ss.get("_clear_register_fields"):
@@ -2944,6 +3001,10 @@ def render_login() -> None:
 
     # Process submission AFTER form (outside with block)
     if submitted:
+        # Store attempted credentials for error auto-clear detection
+        ss["_last_login_email"] = email
+        ss["_last_login_password"] = password
+        
         if not email or not password:
             st.error("Please enter email and password.")
         else:
@@ -2958,6 +3019,10 @@ def render_login() -> None:
                 refresh_token = data.get("refresh_token")
                 
                 if token and session_id and refresh_token:
+                    # Clear login error on successful login
+                    ss["login_error"] = None
+                    ss["login_error_detail"] = None
+                    
                     # Use centralized auth setter
                     set_auth(token, user, session_id, refresh_token)
                     
@@ -3673,7 +3738,7 @@ def main() -> None:
         if is_logged_in() and not ss.get("capabilities"):
             fetch_and_cache_capabilities()
 
-    # Initialize NAV_STATE_KEY if not set (first run or after state clear)
+    # E) Initialize NAV_STATE_KEY BEFORE sidebar renders (ensures radio always has valid state)
     if ss.get(NAV_STATE_KEY) is None:
         initial_page = "Analyzer" if is_authenticated() else "Login"
         ss[NAV_STATE_KEY] = initial_page
