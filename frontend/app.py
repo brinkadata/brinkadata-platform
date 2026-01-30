@@ -1030,141 +1030,45 @@ def render_header() -> None:
         )
 
 
-def render_sidebar() -> None:
-    with st.sidebar:
-        # Logo (small)
-        try:
-            st.image(LOGO_PATH, width='stretch')
-        except Exception:
-            st.write("Brinkadata")
-        
-        # Backend API status indicator
-        if is_backend_unreachable():
-            st.error("⚠️ Backend unreachable")
-            if st.button("🔄 Retry Connection", use_container_width=True, key="retry_connection_btn"):
-                # Clear error state, force ping, and trigger rerun
-                ss["_backend_status"] = "unknown"
-                ss["_backend_was_down"] = True
-                ss["_force_backend_ping"] = True
-                st.rerun()
-        elif ss.get("_backend_status") == "ok":
-            st.success("✅ Connected")
-        # Don't show anything for "unknown" (initial state)
-        
-        # Auth Debug Section (always visible - production-safe)
-        st.markdown("---")
-        st.markdown("### 🔐 Auth Status")
-        
-        # Show configured API base URL
-        try:
-            api_base = get_api_base_url()
-            # Mask full URL in production - just show domain
-            if IS_LOCAL:
-                st.caption(f"**API:** {api_base}")
-            else:
-                # Show just the domain in production
-                from urllib.parse import urlparse
-                parsed = urlparse(api_base)
-                domain = parsed.netloc or parsed.path.split('/')[0]
-                st.caption(f"**API:** {domain}")
-            st.caption(f"**Environment:** {ENV}")
-        except Exception as e:
-            st.error(f"⚠️ API config error: {str(e)[:60]}")
-        
-        # Auth token presence (never show actual token)
-        has_token = bool(st.session_state.get("auth_token"))
-        if has_token:
-            st.caption("**Auth token:** ✅ Present")
-        else:
-            st.caption("**Auth token:** ❌ None")
-        
-        # Current user email (if authenticated)
-        current_user = st.session_state.get("current_user")
-        if current_user and isinstance(current_user, dict):
-            email = current_user.get("email", "Unknown")
-            # Mask email in production (show first 3 chars + domain)
-            if not IS_LOCAL and "@" in email:
-                parts = email.split("@")
-                masked = f"{parts[0][:3]}***@{parts[1]}"
-                st.caption(f"**User:** {masked}")
-            else:
-                st.caption(f"**User:** {email}")
-        else:
-            st.caption("**User:** Not logged in")
+def render_sidebar() -> str:
+    """Render sidebar and return the current routed page (NAV_STATE_KEY).
 
-        # Account info - dynamically show based on auth state
-        st.markdown("### Account")
-        if current_user and isinstance(current_user, dict):
-            user_display = current_user.get("email", "User").split("@")[0]  # Show first part of email
-            role_display = current_user.get("role", "member").title()
-            st.info(f"Logged in as: **{user_display}** ({role_display})")
-            
-            # Show plan from capabilities if available
-            caps = ss.get("capabilities")
-            if caps and isinstance(caps, dict):
-                plan_display = caps.get("plan", "free").title()
-                st.caption(f"Plan: {plan_display}")
-            else:
-                st.caption("Plan: Loading...")
+    CRITICAL RULE:
+    - Do NOT modify any widget-key session_state after the widget is instantiated.
+      (e.g., NAV_WIDGET_KEY must never be written after st.radio runs)
+    """
+    ss = st.session_state
+
+    # ---- Auth status / environment ----
+    authed = is_authenticated()
+
+    with st.sidebar:
+        st.markdown("### Brinkadata")
+
+        # Status box
+        st.markdown("---")
+        st.markdown("#### 🔐 Auth Status")
+        api_base = get_api_base_url()
+        st.write(f"API: {api_base}")
+        st.write(f"Environment: {'development' if IS_DEV else 'production'}")
+        st.write(f"Auth token: {'✅ Present' if ss.get('auth_token') else '❌ None'}")
+        user = ss.get("current_user") or {}
+        if user:
+            # keep it safe/minimal
+            email = user.get("email") or user.get("username") or "Logged in"
+            st.write(f"User: {email}")
         else:
-            st.caption("Not logged in")
-        
-        # Debug info (dev only)
-        if ENABLE_DEBUG_UI:
-            st.caption(f"Auth token present: {'Yes' if st.session_state.get('auth_token') else 'No'}")
-            
-            # Show cached capabilities (if available)
-            caps = ss.get("capabilities")
-            if caps:
-                st.caption(f"Plan: {caps.get('plan', 'unknown')} | Role: {caps.get('role', 'unknown')}")
-                st.caption(f"Capabilities: {len(caps.get('list', []))} cached")
-                # Test can() helper
-                st.caption(f"can('asset:manage'): {can('asset:manage')}")
-            else:
-                # If logged in but capabilities missing, show loading state
-                if is_logged_in():
-                    st.caption("⏳ Loading permissions...")
-                    # Trigger capability fetch (can() will auto-hydrate)
-                    _ = can("asset:manage")  # This will trigger auto-hydration
-                else:
-                    st.caption("Capabilities: not loaded (not authenticated)")
-        
-        # Usage stats (only fetch if rehydration complete and authenticated)
-        auth_token = st.session_state.get('auth_token')
-        session_rehydrated = st.session_state.get('session_rehydrated', False)
-        
-        if auth_token and session_rehydrated:
-            try:
-                resp = api_request("GET", "/account/info", timeout=10)
-                if resp and resp.status_code == 200:
-                    account_data = resp.json()
-                    usage = account_data.get("usage", {})
-                    limits = account_data.get("limits", {})
-                    
-                    st.markdown("**Usage:**")
-                    saved_deals = usage.get("saved_deals", 0)
-                    max_deals = limits.get("saved_deals", 5)
-                    if max_deals == -1:  # unlimited
-                        st.caption(f"Saved deals: {saved_deals} (unlimited)")
-                    else:
-                        st.caption(f"Saved deals: {saved_deals}/{max_deals}")
-                        if saved_deals >= max_deals * 0.8:  # 80% usage
-                            st.warning("⚠️ Approaching deal limit")
-            except Exception:
-                pass
-        else:
-            st.caption("_Not logged in_")
-        
-        # Session management buttons (only show when authenticated)
-        if auth_token:
-            st.markdown("---")
-            st.markdown("**Session Management**")
-            
-            # Get resume code button
-            # Resume codes allow session restoration after browser refresh/rerun WITHOUT requiring re-login.
-            # Important: Resume codes ONLY work if the backend session is still active.
-            # After logout, the backend session is REVOKED and resume codes will fail (by design).
-            if st.button("🔑 Get Resume Code", key="get_resume_code_btn", use_container_width=True):
+            st.write("User: Not logged in")
+
+        # Account actions
+        st.markdown("---")
+        st.markdown("#### Account")
+        if authed:
+            uname = (ss.get("current_user") or {}).get("username") or (ss.get("current_user") or {}).get("email") or "Current user"
+            st.info(f"Logged in as: {uname}")
+
+            # Optional: resume + logout controls if you already had them
+            if st.button("🔑 Get Resume Code", use_container_width=True):
                 try:
                     resp = api_request("POST", "/auth/resume/request", json={}, timeout=10)
                     if resp and resp.status_code == 200:
@@ -1179,32 +1083,10 @@ def render_sidebar() -> None:
                             st.error("Failed to generate resume code.")
                     else:
                         st.error(f"Failed to request resume code. Status: {resp.status_code if resp else 'No response'}")
-                        if resp:
-                            try:
-                                error_data = resp.json()
-                                st.code(json.dumps(error_data, indent=2), language="json")
-                            except Exception:
-                                st.code(resp.text, language="text")
                 except Exception as e:
                     st.error(f"Error: {e}")
-            
-            # DEBUG ONLY: Simulate Refresh button (visible only in dev environment)
-            if ENABLE_DEBUG_UI:
-                # This clears Streamlit session state (simulating browser refresh) WITHOUT revoking backend session.
-                # Use this to test resume flow. After clicking, use "Get Resume Code" first, then paste it.
-                # Different from Logout: Logout REVOKES the backend session permanently; resume will fail after logout.
-                if st.button("🔄 Simulate Refresh (DEBUG)", key="simulate_refresh_btn", use_container_width=True):
-                    # Clear only Streamlit session state; do NOT call backend /auth/logout
-                    # This simulates a browser refresh where tokens are lost but backend session is still active
-                    for key in ["auth_token", "current_user", "session_id", "refresh_token"]:
-                        if key in ss:
-                            del ss[key]
-                    st.info("Session state cleared (simulating refresh). Backend session still active. Use 'Resume Session' on login page.")
-                    st.rerun()
-            
-            # Logout button
-            # This REVOKES the backend session permanently. Resume codes will NOT work after logout.
-            if st.button("🚪 Logout", key="logout_btn", use_container_width=True):
+
+            if st.button("🚪 Logout", use_container_width=True):
                 # Call backend logout if session exists
                 session_id = ss.get("session_id")
                 refresh_token = ss.get("refresh_token")
@@ -1222,435 +1104,98 @@ def render_sidebar() -> None:
                 
                 # Clear auth state using centralized helper
                 clear_auth()
-                
-                # Navigate to login page using deterministic router
-                request_nav("Login")
-        
-        # Auth Smoke Test (visible when authenticated)
-        if auth_token:
-            st.markdown("---")
-            st.markdown("**🔬 Auth Smoke Test**")
-            st.caption("Test authentication status with protected endpoint")
-            
-            if st.button("🧪 Test Auth", key="auth_smoke_test_btn", use_container_width=True):
-                try:
-                    # Call a protected endpoint to verify auth is working
-                    resp = api_request("GET", "/account/info", timeout=10)
-                    
-                    if resp and resp.status_code == 200:
-                        data = resp.json()
-                        st.success("✅ Auth working correctly!")
-                        st.caption(f"Account: {data.get('account_name', 'Unknown')}")
-                        st.caption(f"Plan: {data.get('plan', 'unknown')}")
-                    elif resp and resp.status_code == 401:
-                        st.error("❌ Auth token invalid or expired")
-                        st.caption("Try logging out and back in")
-                    elif resp and resp.status_code == 403:
-                        st.warning("⚠️ Authenticated but missing permissions")
-                    elif resp:
-                        st.error(f"❌ Error: HTTP {resp.status_code}")
-                    else:
-                        st.error("❌ Cannot connect to backend")
-                        
-                except Exception as e:
-                    st.error(f"❌ Error: {str(e)[:100]}")
-            
-            # Show current connection status
-            api_base = get_api_base_url()
-            st.caption(f"API: {api_base}")
-            if is_authenticated():
-                st.caption("✅ Token present")
-            else:
-                st.caption("❌ No auth token")
-        
-        # DEV Test Controls Panel (DEV-only, gated by IS_DEV or ENABLE_DEBUG_UI)
-        if ENABLE_DEBUG_UI and auth_token:
-            st.markdown("---")
-            with st.expander("🧪 DEV Test Controls", expanded=False):
-                st.caption("**Permission Testing (DEV-only)**")
-                
-                # Fetch user/account info from backend (use cached version if available)
-                dev_context_key = "_dev_context"
-                dev_context = ss.get(dev_context_key)
-                
-                # Fetch if not cached or auth state changed
-                if not dev_context or ss.get("_dev_context_token") != auth_token:
-                    try:
-                        resp = api_request("GET", "/account/info", timeout=10)
-                        if resp and resp.status_code == 200:
-                            account_data = resp.json()
-                            # Fetch user info from current_user in session (set during login)
-                            current_user = ss.get("current_user", {})
-                            user_id = current_user.get("user_id") or current_user.get("id")
-                            
-                            dev_context = {
-                                "user_id": user_id,
-                                "account_id": account_data.get("account_id"),
-                                "current_plan": account_data.get("plan", "free"),
-                                "loaded": True
-                            }
-                            ss[dev_context_key] = dev_context
-                            ss["_dev_context_token"] = auth_token
-                            # Auto-rerun once after first successful context load to display controls
-                            if not ss.get("_dev_context_initial_loaded"):
-                                ss["_dev_context_initial_loaded"] = True
-                                st.rerun()
-                        else:
-                            dev_context = {"loaded": False, "error": f"Status {resp.status_code if resp else 'no response'}"}
-                            ss[dev_context_key] = dev_context
-                    except Exception as e:
-                        dev_context = {"loaded": False, "error": str(e)}
-                        ss[dev_context_key] = dev_context
-                
-                # Display controls if context loaded successfully
-                if dev_context and dev_context.get("loaded"):
-                    user_id = dev_context.get("user_id")
-                    account_id = dev_context.get("account_id")
-                    
-                    st.text(f"User ID: {user_id}")
-                    st.text(f"Account ID: {account_id}")
-                    
-                    # Plan selector
-                    plan_options = ["free", "pro", "team", "enterprise"]
-                    current_plan = ss.get("capabilities", {}).get("plan") or dev_context.get("current_plan", "free")
-                    
-                    selected_plan = st.selectbox(
-                        "Test Plan",
-                        options=plan_options,
-                        index=plan_options.index(current_plan) if current_plan in plan_options else 0,
-                        key="dev_test_plan"
-                    )
-                    
-                    # Role selector
-                    role_options = ["owner", "admin", "member", "read_only"]
-                    current_role = ss.get("capabilities", {}).get("role", "member")
-                    
-                    selected_role = st.selectbox(
-                        "Test Role",
-                        options=role_options,
-                        index=role_options.index(current_role) if current_role in role_options else 2,
-                        key="dev_test_role"
-                    )
-                    
-                    # Apply buttons
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        if st.button("Apply Plan", key="dev_apply_plan_btn", use_container_width=True):
-                            try:
-                                resp = api_request(
-                                    "POST",
-                                    f"/admin/set_plan?account_id={account_id}&plan={selected_plan}",
-                                    timeout=10
-                                )
-                                if resp and resp.status_code == 200:
-                                    # Clear all cached state
-                                    if "capabilities" in ss:
-                                        del ss["capabilities"]
-                                    if dev_context_key in ss:
-                                        del ss[dev_context_key]
-                                    if "_dev_context_token" in ss:
-                                        del ss["_dev_context_token"]
-                                    if "_dev_context_initial_loaded" in ss:
-                                        del ss["_dev_context_initial_loaded"]
-                                    
-                                    # Immediately re-fetch capabilities to update UI
-                                    if fetch_and_cache_capabilities():
-                                        # Normalize auth context to update canonical keys
-                                        normalize_auth_context()
-                                        set_debug_cause("plan_change")
-                                        st.success(f"✅ Plan set to {selected_plan} - Capabilities updated")
-                                    else:
-                                        st.warning(f"✅ Plan set to {selected_plan} - Reload to update UI")
-                                    st.rerun()
-                                else:
-                                    st.error(f"❌ Failed: {resp.status_code if resp else 'No response'}")
-                            except Exception as e:
-                                st.error(f"❌ Error: {str(e)[:100]}")
-                    
-                    with col2:
-                        if st.button("Apply Role", key="dev_apply_role_btn", use_container_width=True):
-                            try:
-                                resp = api_request(
-                                    "POST",
-                                    f"/admin/set_role?user_id={user_id}&role={selected_role}",
-                                    timeout=10
-                                )
-                                if resp and resp.status_code == 200:
-                                    # Clear all cached state
-                                    if "capabilities" in ss:
-                                        del ss["capabilities"]
-                                    if dev_context_key in ss:
-                                        del ss[dev_context_key]
-                                    if "_dev_context_token" in ss:
-                                        del ss["_dev_context_token"]
-                                    if "_dev_context_initial_loaded" in ss:
-                                        del ss["_dev_context_initial_loaded"]
-                                    
-                                    # Immediately re-fetch capabilities to update UI
-                                    if fetch_and_cache_capabilities():
-                                        # Normalize auth context to update canonical keys
-                                        normalize_auth_context()
-                                        set_debug_cause("role_change")
-                                        st.success(f"✅ Role set to {selected_role} - Capabilities updated")
-                                    else:
-                                        st.warning(f"✅ Role set to {selected_role} - Reload to update UI")
-                                    st.rerun()
-                                else:
-                                    st.error(f"❌ Failed: {resp.status_code if resp else 'No response'}")
-                            except Exception as e:
-                                st.error(f"❌ Error: {str(e)[:100]}")
-                    
-                    st.caption("⚠️ Changes take effect immediately. Cached capabilities will be cleared and UI will reload.")
-                else:
-                    # Show compact error message without exposing tokens
-                    error_msg = dev_context.get("error", "Unable to load") if dev_context else "Loading..."
-                    st.caption(f"⚠️ Context unavailable: {error_msg}")
-                    if st.button("🔄 Retry", key="dev_retry_context", use_container_width=True):
-                        # Clear cached context to force refresh
-                        if dev_context_key in ss:
-                            del ss[dev_context_key]
-                        if "_dev_context_token" in ss:
-                            del ss["_dev_context_token"]
-                        st.rerun()
 
-        st.markdown("### Navigation")
-        
-        # A) Build OPTIONS dynamically based on auth state
-        if is_authenticated():
-            pages = ["Analyzer", "Portfolio", "Plans & Billing", "Projects (Coming Soon)", "Assets (Coming Soon)", "Property Search (Coming Soon)"]
+                # Clear login error state so it can't persist
+                ss["login_error"] = False
+                ss["login_error_detail"] = None
+
+                # Route to Login (deferred)
+                ss[NAV_DEFERRED_KEY] = "Login"
+                ss[POST_LOGIN_NAV_KEY] = None
+                st.rerun()
         else:
-            pages = ["Login", "Analyzer", "Portfolio", "Plans & Billing", "Projects (Coming Soon)", "Assets (Coming Soon)", "Property Search (Coming Soon)"]
-        
-        # B) Always compute current_page from router state BEFORE rendering radio
-        current_page = ss.get(NAV_STATE_KEY)
-        if not current_page:
-            current_page = "Analyzer" if is_authenticated() else "Login"
-        
-        # If current_page not in options (e.g., was on Login but now authenticated), reset
-        if current_page not in pages:
-            current_page = "Analyzer" if is_authenticated() else "Login"
-            ss[NAV_STATE_KEY] = current_page  # OK to set router state BEFORE widgets
-        
-        # C) Render radio with stable index
-        current_index = pages.index(current_page)
+            st.caption("Not logged in")
+
+        # Smoke test section (keep if you already have it)
+        st.markdown("---")
+        st.markdown("#### 🧪 Auth Smoke Test")
+        st.caption("Test authentication status with protected endpoint")
+        if st.button("🧪 Test Auth", use_container_width=True):
+            try:
+                resp = api_request("GET", "/account/info", timeout=10)
+                if resp and resp.status_code == 200:
+                    st.success("Auth OK")
+                else:
+                    st.warning(f"Auth check failed: {resp.status_code if resp else 'No response'}")
+            except Exception as e:
+                st.warning(f"Auth check failed: {e}")
+
+        # ---- Navigation options ----
+        st.markdown("---")
+        st.markdown("#### Navigation")
+
+        # Build nav labels depending on auth state
+        if authed:
+            nav_options = [
+                "Analyzer",
+                "Portfolio",
+                "Plans & Billing",
+                "Projects (Coming Soon)",
+                "Assets (Coming Soon)",
+                "Property Search (Coming Soon)",
+            ]
+        else:
+            nav_options = [
+                "Login",
+                "Analyzer",
+                "Portfolio",
+                "Plans & Billing",
+                "Projects (Coming Soon)",
+                "Assets (Coming Soon)",
+                "Property Search (Coming Soon)",
+            ]
+
+        # Router truth (non-widget key)
+        current_page = ss.get(NAV_STATE_KEY) or ("Analyzer" if authed else "Login")
+        ss[NAV_STATE_KEY] = current_page  # ensure always set
+
+        # Ensure widget key exists and is valid BEFORE widget instantiation
+        if ss.get(NAV_WIDGET_KEY) not in nav_options:
+            # If current_page not in nav options (e.g., Login while authed), fall back to Analyzer
+            desired = current_page if current_page in nav_options else ("Analyzer" if authed else "Login")
+            ss[NAV_WIDGET_KEY] = desired
+
         selected = st.radio(
             "Go to",
-            pages,
-            index=current_index,
+            options=nav_options,
             key=NAV_WIDGET_KEY,
         )
-        
-        # D) After radio renders: handle selection without mutating NAV_WIDGET_KEY
-        # Guard against None selection
-        if not selected:
-            selected = current_page
-        
-        # Handle selection changes - use go_to() which never mutates widget keys
+
+        # Defensive: radio should return a string, but don't assume
+        if not isinstance(selected, str):
+            selected = ss.get(NAV_WIDGET_KEY) or (current_page if current_page in nav_options else nav_options[0])
+
+        # Handle coming soon
+        if "(Coming Soon)" in selected:
+            st.info("That page is coming soon.")
+            # Snap back by rerunning; next run will set NAV_WIDGET_KEY BEFORE widget creation
+            ss["_nav_info_flash"] = True
+            st.rerun()
+
+        # If user clicked a different real page, navigate using deferred pattern
         if selected != current_page:
-            # Coming soon pages: show info and don't navigate
-            if "(Coming Soon)" in selected:
-                st.info("Coming soon.")
-                # Return current_page to prevent navigation
-                return
-            
-            # Protected pages while logged out: redirect to Login and remember intent
-            if (selected in PROTECTED_PAGES) and (not is_authenticated()):
+            protected_pages = {"Analyzer", "Portfolio", "Plans & Billing"}
+            if (selected in protected_pages) and (not authed):
                 ss[POST_LOGIN_NAV_KEY] = selected
-                st.warning("You must be logged in to access this page.")
                 go_to("Login")
-                return
-            
-            # Normal navigation - use go_to() which safely defers
-            go_to(selected)
-            return
-        
-        # No action needed if selected == current_page
-        return
+            else:
+                go_to(selected)
 
-        st.markdown("### Behavior")
-        st.checkbox(
-            "Auto-run analysis after loading from portfolio",
-            key="auto_run_after_load",
-            help="When on, loading a deal from the portfolio will immediately re-run the analysis.",
-        )
+        # Optional UX: show a logged-out warning if they tried to access a protected page
+        if not authed and current_page in {"Analyzer", "Portfolio", "Plans & Billing"}:
+            st.warning("You must be logged in to access this page.")
 
-        st.markdown("### Presets & Market")
-        preset_names = ["None"] + list(PRESET_DEALS.keys())
-        st.selectbox(
-            "Quick preset",
-            preset_names,
-            index=preset_names.index(ss.get("selected_preset", "None")),
-            key="selected_preset",
-        )
-
-        st.text_input(
-            "ZIP code (for market context)",
-            key="zip_code",
-        )
-
-        if st.button("Apply preset"):
-            apply_preset(ss["selected_preset"])
-
-        st.markdown(
-            "<p style='font-size: 0.75rem; color: #6b7280;'>"
-            "Preset applies on this session only. Values are editable after load."
-            "</p>",
-            unsafe_allow_html=True,
-        )
-        
-        # DEV-only State Debug UI
-        if ENABLE_DEBUG_UI and 'snapshot_state' in globals():
-            st.markdown("---")
-            with st.expander("🔎 State Debug (DEV)", expanded=False):
-                st.caption("DEV-only diagnostics for session state debugging")
-                
-                # Navigation debug info
-                st.markdown("##### Navigation State")
-                st.text(f"nav_page: {ss.get(NAV_STATE_KEY, 'NONE')}")
-                st.text(f"nav_page_radio: {ss.get(NAV_WIDGET_KEY, 'NONE')}")
-                st.text(f"_nav_to: {ss.get(NAV_DEFERRED_KEY, 'NONE')}")
-                st.text(f"is_authenticated: {is_authenticated()}")
-                st.text(f"auth_token present: {'Yes' if ss.get('auth_token') else 'No'}")
-                st.text(f"current_user present: {'Yes' if ss.get('current_user') else 'No'}")
-                if ss.get("current_user"):
-                    st.text(f"user role: {ss.get('current_user', {}).get('role', 'NONE')}")
-                st.text(f"session_rehydrated: {ss.get('session_rehydrated', False)}")
-                
-                # Change detection summary
-                if 'detect_state_changes' in globals():
-                    changed, old_fp, new_fp = detect_state_changes(ss)
-                    last_change_time = ss.get("_debug_last_change_time", "never")
-                    # Peek at cause without consuming it (will be consumed on next state change log)
-                    pending_cause = ss.get("_debug_cause", "none")
-                    
-                    st.markdown("##### Change Detection")
-                    change_icon = "✅" if changed else "❌"
-                    st.text(f"Changed since last: {change_icon} {'Yes' if changed else 'No'}")
-                    st.text(f"Current fingerprint: {new_fp}")
-                    if old_fp:
-                        st.text(f"Previous fingerprint: {old_fp}")
-                    st.text(f"Last change: {last_change_time}")
-                    st.text(f"Pending cause: {pending_cause}")
-                    st.markdown("---")
-                
-                # Capabilities fetch status
-                cap_status = ss.get("_cap_fetch_status", "unknown")
-                cap_error = ss.get("_cap_fetch_last_error")
-                cap_warn_count = ss.get("_cap_fetch_warn_count", 0)
-                
-                st.markdown("##### Capabilities Fetch")
-                status_icon = {
-                    "ok": "✅",
-                    "not_authenticated": "🔒",
-                    "backend_unreachable": "🔌",
-                    "auth_failed": "🚫",
-                    "backend_error": "⚠️",
-                    "unknown": "❓"
-                }.get(cap_status, "❓")
-                st.text(f"Status: {status_icon} {cap_status}")
-                if cap_error:
-                    st.text(f"Last error: {cap_error}")
-                st.text(f"Warnings logged: {cap_warn_count}/3")
-                st.markdown("---")
-                
-                # API Health (Phase 2)
-                api_health = _api_health_snapshot(ss)
-                if api_health:
-                    st.markdown("##### API Health")
-                    for endpoint, health in api_health.items():
-                        status = health["status"]
-                        status_icon = {
-                            "ok": "✅",
-                            "error": "❌",
-                            "no_response": "🔌",
-                            "not_authenticated": "🔒",
-                            "throttled": "⏸️"
-                        }.get(status, "❓")
-                        
-                        st.text(f"{endpoint}")
-                        st.text(f"  Status: {status_icon} {status} ({health['age']})")
-                        st.text(f"  OK: {health['ok_count']} | Err: {health['err_count']}")
-                        if health["last_error"] != "none":
-                            st.text(f"  Last error: {health['last_error']}")
-                        if health["http_status"]:
-                            st.text(f"  HTTP: {health['http_status']}")
-                    st.markdown("---")
-                
-                # Portfolio Recovery Status
-                st.markdown("##### Portfolio Auto-Recovery")
-                recovery_active = ss.get("_portfolio_recovery_active", False)
-                recovery_attempts = ss.get("_portfolio_recovery_attempts", 0)
-                recovery_ts = ss.get("_portfolio_recovery_last_attempt_ts", 0.0)
-                
-                recovery_icon = "🔄" if recovery_active else "⏸️"
-                st.text(f"Active: {recovery_icon} {'YES' if recovery_active else 'NO'}")
-                st.text(f"Attempts: {recovery_attempts}/{PORTFOLIO_RECOVERY_MAX_ATTEMPTS}")
-                
-                if recovery_ts > 0:
-                    import time
-                    age_seconds = int(time.time() - recovery_ts)
-                    if age_seconds < 60:
-                        age_str = f"{age_seconds}s ago"
-                    else:
-                        age_str = f"{age_seconds // 60}m ago"
-                    st.text(f"Last attempt: {age_str}")
-                else:
-                    st.text("Last attempt: never")
-                
-                # Show /property/saved endpoint status
-                if api_health.get("/property/saved"):
-                    saved_status = api_health["/property/saved"]["status"]
-                    st.text(f"Endpoint /property/saved: {saved_status}")
-                
-                st.markdown("---")
-                
-                # Current state snapshot
-                st.markdown("##### Current State")
-                snapshot = snapshot_state(ss, KEYS_OF_INTEREST)
-                
-                # Display as table
-                for key in KEYS_OF_INTEREST:
-                    if key in snapshot:
-                        entry = snapshot[key]
-                        if entry["exists"]:
-                            value_str = str(entry["value"])
-                            if len(value_str) > 50:
-                                value_str = value_str[:50] + "..."
-                            
-                            meta_str = ""
-                            if "meta" in entry:
-                                meta = entry["meta"]
-                                meta_str = f" | {meta['source']} @ {meta['ts'][-12:-4]}"
-                            
-                            st.text(f"{key}: {value_str}{meta_str}")
-                        else:
-                            st.text(f"{key}: (not set)")
-                
-                st.markdown("##### Recent Events")
-                events = get_recent_events(ss, limit=30)
-                if events:
-                    for evt in events[-10:]:  # Show last 10
-                        ts_short = evt["ts"][-12:-4] if "ts" in evt else ""
-                        details_str = ""
-                        if "details" in evt:
-                            details_str = f" | {evt['details']}"
-                        st.caption(f"{ts_short} - {evt['name']}{details_str}")
-                else:
-                    st.caption("No events recorded yet")
-                
-                # Action buttons
-                col_copy, col_clear = st.columns(2)
-                with col_copy:
-                    if st.button("📋 Copy Snapshot", key="dev_copy_snapshot", use_container_width=True):
-                        json_export = export_snapshot_json(ss, KEYS_OF_INTEREST)
-                        st.text_area("Snapshot JSON (copy this)", json_export, height=200, key="dev_snapshot_output")
-                
-                with col_clear:
-                    if st.button("🗑️ Clear History", key="dev_clear_history", use_container_width=True):
-                        clear_debug_history(ss)
-                        st.success("Debug history cleared")
-                        st.rerun()
+        return ss.get(NAV_STATE_KEY) or current_page
 
 
 # --------------------------------------------------------------------
@@ -3019,15 +2564,15 @@ def render_login() -> None:
                 refresh_token = data.get("refresh_token")
                 
                 if token and session_id and refresh_token:
-                    # Clear login error on successful login
-                    ss["login_error"] = None
-                    ss["login_error_detail"] = None
-                    
                     # Use centralized auth setter
                     set_auth(token, user, session_id, refresh_token)
                     
                     # Fetch and cache capabilities after successful login
                     fetch_and_cache_capabilities()
+                    
+                    # Clear login error state on successful login
+                    ss["login_error"] = False
+                    ss["login_error_detail"] = None
                     
                     if IS_DEV and 'track_event' in globals():
                         track_event(ss, "login_success", {"user": user.get("email", "unknown")})
