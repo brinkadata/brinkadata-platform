@@ -2510,21 +2510,15 @@ def render_login() -> None:
                     ss["login_error"] = "Login failed: incomplete session data."
                     st.rerun()
             elif resp:
-                # Failed login - store error and defer password clear
-                detail_text = ""
-                try:
-                    detail_text = resp.text
-                except Exception:
-                    detail_text = "No response detail"
-                
-                ss["login_error"] = f"Login failed: {resp.status_code}"
-                ss["login_error_detail"] = detail_text
+                # Failed login - show standard error message and defer password clear
+                ss["login_error"] = "Incorrect email or password."
+                ss.pop("login_error_detail", None)  # Don't expose backend details to user
                 ss[CLEAR_LOGIN_PW_KEY] = True
                 st.rerun()
             else:
                 # Network error or timeout (resp is None)
-                ss["login_error"] = "Login error: Unable to connect to server"
-                ss["login_error_detail"] = "Please check your connection and try again."
+                ss["login_error"] = "We couldn't sign you in. Please try again."
+                ss["login_error_detail"] = "Unable to connect to server. Please check your connection."
                 ss[CLEAR_LOGIN_PW_KEY] = True
                 st.rerun()
     
@@ -2702,8 +2696,10 @@ def render_login() -> None:
     # Show last login error if present (BEFORE form) - no dismiss button
     if ss.get("login_error"):
         st.error(ss["login_error"])
-        if ss.get("login_error_detail"):
-            st.code(ss["login_error_detail"])
+        # Optional: show details in debug expander (not displayed by default)
+        if IS_DEV and ss.get("login_error_detail"):
+            with st.expander("Debug Details", expanded=False):
+                st.caption(ss["login_error_detail"])
     
     st.header("Login")
 
