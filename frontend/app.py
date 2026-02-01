@@ -2521,6 +2521,12 @@ def render_login() -> None:
                 ss["login_error_detail"] = detail_text
                 ss[CLEAR_LOGIN_PW_KEY] = True
                 st.rerun()
+            else:
+                # Network error or timeout (resp is None)
+                ss["login_error"] = "Login error: Unable to connect to server"
+                ss["login_error_detail"] = "Please check your connection and try again."
+                ss[CLEAR_LOGIN_PW_KEY] = True
+                st.rerun()
     
     if ss.get("_do_register"):
         ss["_do_register"] = False
