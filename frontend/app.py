@@ -2506,6 +2506,18 @@ def render_login() -> None:
         st.caption("Navigate using the sidebar to access other pages.")
         return  # Stop rendering login forms
     
+    # ===== CRITICAL SECTION: ALL STATE MUTATIONS BEFORE FORMS =====
+    # Clear register/resume fields if flagged (BEFORE any rendering)
+    if ss.get("_clear_register_fields"):
+        ss.pop("register_email", None)
+        ss.pop("register_password", None)
+        ss.pop("register_account_name", None)
+        ss.pop("_clear_register_fields", None)
+    
+    if ss.get("_clear_resume_field"):
+        ss.pop("resume_code_input", None)
+        ss.pop("_clear_resume_field", None)
+    
     # Auto-clear login error if user changes email/password (improves UX)
     # Store last attempted credentials to detect changes
     last_login_email = ss.get("_last_login_email", "")
@@ -2518,23 +2530,13 @@ def render_login() -> None:
         if ss.get("login_error"):
             ss["login_error"] = None
             ss["login_error_detail"] = None
+    # ===== END CRITICAL SECTION =====
     
     # Show last login error if present (BEFORE form) - no dismiss button
     if ss.get("login_error"):
         st.error(ss["login_error"])
         if ss.get("login_error_detail"):
             st.code(ss["login_error_detail"])
-    
-    # Clear register/resume fields if flagged (BEFORE forms)
-    if ss.get("_clear_register_fields"):
-        ss.pop("register_email", None)
-        ss.pop("register_password", None)
-        ss.pop("register_account_name", None)
-        ss.pop("_clear_register_fields", None)
-    
-    if ss.get("_clear_resume_field"):
-        ss.pop("resume_code_input", None)
-        ss.pop("_clear_resume_field", None)
     
     st.header("Login")
 
