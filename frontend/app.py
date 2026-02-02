@@ -265,15 +265,24 @@ ss = st.session_state
 # Navigation helpers (single source of truth)
 # --------------------------------------------------------------------
 
-def go_to(page: str) -> None:
-    """Request navigation via deferred action - NEVER writes widget keys."""
+def go_to(page: str, *, rerun: bool = True) -> None:
+    """Request navigation via deferred action - NEVER writes widget keys.
+    
+    Args:
+        page: Target page name
+        rerun: Whether to trigger st.rerun() immediately (default True).
+               Set to False when called from widget callbacks (radio, button)
+               that already trigger a rerun.
+    """
     ss = st.session_state
     current = ss.get(NAV_STATE_KEY)
     if page == current:
         return
     # CRITICAL: Only set deferred key, never mutate NAV_WIDGET_KEY or NAV_STATE_KEY here
     ss[NAV_DEFERRED_KEY] = page
-    st.rerun()
+    # Only rerun when caller truly needs it (non-widget code paths)
+    if rerun:
+        st.rerun()
 
 def request_nav(page: str) -> None:
     """Backwards compatible alias."""
@@ -287,27 +296,21 @@ def apply_deferred_actions() -> bool:
     ss = st.session_state
     changed = False
 
-    # 1) Clear login password safely (ONLY before widgets)
-    if ss.get(CLEAR_LOGIN_PW_KEY):
-        ss[LOGIN_PASSWORD_KEY] = ""  # Clear password field safely before widget creation
-        ss[CLEAR_LOGIN_PW_KEY] = False
-        changed = True
-
-    # 2) If user is logged out but persisted nav points to a protected page, force Login (prevents rerun loops)
+    # 1) If user is logged out but persisted nav points to a protected page, force Login (prevents rerun loops)
     if not is_authenticated():
         current = ss.get(NAV_STATE_KEY)
         if current and current in PROTECTED_PAGES:
             ss[NAV_STATE_KEY] = "Login"
             changed = True
 
-    # 3) Handle post-login navigation redirect (do this BEFORE deferred nav)
+    # 2) Handle post-login navigation redirect (do this BEFORE deferred nav)
     if is_authenticated() and ss.get(POST_LOGIN_NAV_KEY):
         target = ss.pop(POST_LOGIN_NAV_KEY)
         ss[NAV_STATE_KEY] = target
         changed = True
         print(f"[ROUTING] post_login_redirect to {target}")
 
-    # 4) Apply deferred navigation atomically
+    # 3) Apply deferred navigation atomically
     if ss.get(NAV_DEFERRED_KEY):
         target = ss.pop(NAV_DEFERRED_KEY)
         ss[NAV_STATE_KEY] = target
@@ -1183,13 +1186,14 @@ def render_sidebar() -> str:
             st.rerun()
 
         # If user clicked a different real page, navigate using deferred pattern
+        # IMPORTANT: Use rerun=False because radio change already triggers rerun
         if selected != current_page:
             protected_pages = {"Analyzer", "Portfolio", "Plans & Billing"}
             if (selected in protected_pages) and (not authed):
                 ss[POST_LOGIN_NAV_KEY] = selected
-                go_to("Login")
+                go_to("Login", rerun=False)
             else:
-                go_to(selected)
+                go_to(selected, rerun=False)
 
         # Optional UX: show a logged-out warning if they tried to access a protected page
         if not authed and current_page in {"Analyzer", "Portfolio", "Plans & Billing"}:
@@ -2463,8 +2467,14 @@ def safe_delta(val1: Optional[float], val2: Optional[float], is_percentage: bool
 
 
 def render_login() -> None:
-    # CRITICAL: Password clearing handled by apply_deferred_actions() BEFORE widgets
-    # This function should NOT clear password - it happens before this function is called
+    ss = st.session_state
+    
+    # ---- CRITICAL SECTION (MUST RUN BEFORE WIDGETS) ----
+    # Clear password field if flagged from previous failed login attempt
+    if ss.get(CLEAR_LOGIN_PW_KEY):
+        ss[LOGIN_PASSWORD_KEY] = ""
+        ss[CLEAR_LOGIN_PW_KEY] = False
+    # ---------------------------------------------------
     
     # ===== DEFERRED ACTIONS: Process login/register/resume BEFORE any UI =====
     # This runs OUTSIDE form context, preventing pink flash / missing submit button
@@ -2495,7 +2505,7 @@ def render_login() -> None:
                     fetch_and_cache_capabilities()
                     
                     # Clear login error state on successful login
-                    ss["login_error"] = False
+                    ss["login_error"] = None
                     ss["login_error_detail"] = None
                     
                     if IS_DEV and 'track_event' in globals():
@@ -2505,22 +2515,25 @@ def render_login() -> None:
                     # Determine target page and navigate
                     target = ss.get(POST_LOGIN_NAV_KEY) or "Analyzer"
                     ss[POST_LOGIN_NAV_KEY] = None  # Clear the redirect target
-                    go_to(target)
+                    go_to(target, rerun=True)
                 else:
                     ss["login_error"] = "Login failed: incomplete session data."
                     st.rerun()
             elif resp:
                 # Failed login - show standard error message and defer password clear
+                # DO NOT call st.rerun() here - form submit already triggers a rerun
                 ss["login_error"] = "Incorrect email or password."
                 ss.pop("login_error_detail", None)  # Don't expose backend details to user
                 ss[CLEAR_LOGIN_PW_KEY] = True
-                st.rerun()
+                # Email remains populated, password will be cleared on next rerun (before widgets)
+                return
             else:
                 # Network error or timeout (resp is None)
                 ss["login_error"] = "We couldn't sign you in. Please try again."
                 ss["login_error_detail"] = "Unable to connect to server. Please check your connection."
                 ss[CLEAR_LOGIN_PW_KEY] = True
-                st.rerun()
+                # Email remains populated, password will be cleared on next rerun (before widgets)
+                return
     
     if ss.get("_do_register"):
         ss["_do_register"] = False
@@ -2693,9 +2706,13 @@ def render_login() -> None:
             ss["login_error_detail"] = None
     # ===== END CRITICAL SECTION =====
     
-    # Show last login error if present (BEFORE form) - no dismiss button
+    # Show login error with dismiss button (BEFORE form for better UX)
     if ss.get("login_error"):
         st.error(ss["login_error"])
+        if st.button("Dismiss", key="dismiss_login_error"):
+            ss["login_error"] = None
+            ss["login_error_detail"] = None
+            st.rerun()
         # Optional: show details in debug expander (not displayed by default)
         if IS_DEV and ss.get("login_error_detail"):
             with st.expander("Debug Details", expanded=False):
@@ -2710,6 +2727,7 @@ def render_login() -> None:
         submitted = st.form_submit_button("Login")
     
     # ✅ Process submission AFTER form (outside with block) - set flags only
+    # DO NOT call st.rerun() - form submit already triggers a rerun
     if submitted:
         if not email or not password:
             st.error("Please enter email and password.")
@@ -2718,7 +2736,7 @@ def render_login() -> None:
             ss["_login_email"] = email
             ss["_login_password"] = password
             ss["_do_login"] = True
-            st.rerun()
+            # Form submit already triggers rerun - no manual rerun needed
 
     st.divider()
     st.subheader("Register New Account")
@@ -2739,6 +2757,7 @@ def render_login() -> None:
         reg_submitted = st.form_submit_button("Register")
     
     # ✅ Process submission AFTER form (outside with block) - set flags only
+    # DO NOT call st.rerun() - form submit already triggers a rerun
     if reg_submitted:
         if not reg_email or not reg_password or not reg_account_name:
             st.error("Please fill in all registration fields.")
@@ -2748,7 +2767,7 @@ def render_login() -> None:
             ss["_reg_password"] = reg_password
             ss["_reg_account_name"] = reg_account_name
             ss["_do_register"] = True
-            st.rerun()
+            # Form submit already triggers rerun - no manual rerun needed
 
     st.divider()
     st.subheader("Resume Session")
@@ -2769,6 +2788,7 @@ def render_login() -> None:
         resume_submitted = st.form_submit_button("Resume")
     
     # ✅ Process submission AFTER form (outside with block) - set flags only
+    # DO NOT call st.rerun() - form submit already triggers a rerun
     if resume_submitted:
         if not resume_code:
             st.error("Please enter a resume code.")
@@ -2776,7 +2796,7 @@ def render_login() -> None:
             # Store code and set flag to process on next run
             ss["_resume_code"] = resume_code.strip()
             ss["_do_resume"] = True
-            st.rerun()
+            # Form submit already triggers rerun - no manual rerun needed
 
 
 # ============================================================================
