@@ -66,6 +66,7 @@ POST_LOGIN_NAV_KEY = "_post_login_nav"     # where to go after login
 CLEAR_LOGIN_PW_KEY = "_clear_login_pw"     # pending password clear applied next run
 LOGIN_EMAIL_KEY = "login_email"
 LOGIN_PASSWORD_KEY = "login_password"
+LOGIN_PW_NONCE_KEY = "login_pw_nonce"      # nonce for password widget key rotation
 
 # Protected pages that require authentication
 PROTECTED_PAGES = {"Analyzer", "Portfolio", "Plans & Billing", "Projects", "Assets", "Property Search"}
@@ -213,6 +214,7 @@ def init_state() -> None:
     # Login form UX helpers - ensure keys exist with defaults
     ss.setdefault(LOGIN_EMAIL_KEY, "")
     ss.setdefault(LOGIN_PASSWORD_KEY, "")
+    ss.setdefault(LOGIN_PW_NONCE_KEY, 0)               # Nonce for password widget rotation
     ss.setdefault("login_error", None)
     ss.setdefault("login_error_detail", None)
     
@@ -2510,8 +2512,11 @@ def render_login() -> None:
                     fetch_and_cache_capabilities()
                     
                     # Clear login error state on successful login
-                    ss["login_error"] = None
-                    ss["login_error_detail"] = None
+                    ss["login_error"] = False
+                    ss["login_error_detail"] = ""
+                    
+                    # Increment nonce to clear password field on next login view
+                    ss[LOGIN_PW_NONCE_KEY] += 1
                     
                     if IS_DEV and 'track_event' in globals():
                         track_event(ss, "login_success", {"user": user.get("email", "unknown")})
@@ -2525,16 +2530,16 @@ def render_login() -> None:
                     ss["login_error"] = "Login failed: incomplete session data."
                     st.rerun()
             elif resp:
-                # Failed login - increment key version to clear password widget
-                ss["_login_key_version"] += 1
-                ss["login_error"] = "Incorrect email or password."
-                ss.pop("login_error_detail", None)  # Don't expose backend details to user
+                # Failed login - increment nonce to clear password widget
+                ss[LOGIN_PW_NONCE_KEY] += 1
+                ss["login_error"] = True
+                ss["login_error_detail"] = "Incorrect email or password."
                 st.rerun()
                 return
             else:
                 # Network error or timeout (resp is None)
-                ss["_login_key_version"] += 1
-                ss["login_error"] = "We couldn't sign you in. Please try again."
+                ss[LOGIN_PW_NONCE_KEY] += 1
+                ss["login_error"] = True
                 ss["login_error_detail"] = "Unable to connect to server. Please check your connection."
                 st.rerun()
                 return
@@ -2655,41 +2660,27 @@ def render_login() -> None:
     if ss.get("_clear_resume_field"):
         ss.pop("resume_code_input", None)
         ss.pop("_clear_resume_field", None)
-    
-    # Auto-clear login error if user changes email/password (improves UX)
-    # Store last attempted credentials to detect changes
-    last_login_email = ss.get("_last_login_email", "")
-    last_login_password = ss.get("_last_login_password", "")
-    current_login_email = ss.get(LOGIN_EMAIL_KEY, "")
-    current_login_password = ss.get(LOGIN_PASSWORD_KEY, "")
-    
-    # If fields changed, clear error automatically
-    if (current_login_email != last_login_email or current_login_password != last_login_password):
-        if ss.get("login_error"):
-            ss["login_error"] = None
-            ss["login_error_detail"] = None
     # ===== END CRITICAL SECTION =====
     
     # Show login error (stays until next attempt)
     if ss.get("login_error"):
-        st.error(ss["login_error"])
-        # Optional: show details in debug expander (not displayed by default)
-        if IS_DEV and ss.get("login_error_detail"):
-            with st.expander("Debug Details", expanded=False):
-                st.caption(ss["login_error_detail"])
+        st.error(ss.get("login_error_detail") or "Incorrect email or password.")
     
     st.header("Login")
 
     # ✅ Login form - ONLY input widgets + submit button inside form
+    # Email keeps its value; password uses nonce-based key rotation for auto-clear
     with st.form("login_form"):
         email = st.text_input(
             "Email",
-            key=f"login_email_{ss['_login_key_version']}"
+            key=LOGIN_EMAIL_KEY
         )
+        # Password widget key includes nonce - incremented on failure to clear field
+        pw_widget_key = f"{LOGIN_PASSWORD_KEY}_{ss[LOGIN_PW_NONCE_KEY]}"
         password = st.text_input(
             "Password",
             type="password",
-            key=f"login_password_{ss['_login_key_version']}"
+            key=pw_widget_key
         )
         submitted = st.form_submit_button("Login")
     
