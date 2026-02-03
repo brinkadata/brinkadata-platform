@@ -215,6 +215,13 @@ def init_state() -> None:
     ss.setdefault(LOGIN_PASSWORD_KEY, "")
     ss.setdefault("login_error", None)
     ss.setdefault("login_error_detail", None)
+    
+    # Widget key version counters for safe clearing
+    if "_login_key_version" not in ss:
+        ss["_login_key_version"] = 0
+    
+    if "_register_key_version" not in ss:
+        ss["_register_key_version"] = 0
 
     # Behavior
     ss.setdefault("auto_run_after_load", True)
@@ -2469,12 +2476,10 @@ def safe_delta(val1: Optional[float], val2: Optional[float], is_percentage: bool
 def render_login() -> None:
     ss = st.session_state
     
-    # ---- CRITICAL SECTION (MUST RUN BEFORE WIDGETS) ----
-    # Clear password field if flagged from previous failed login attempt
-    if ss.get(CLEAR_LOGIN_PW_KEY):
-        ss[LOGIN_PASSWORD_KEY] = ""
-        ss[CLEAR_LOGIN_PW_KEY] = False
-    # ---------------------------------------------------
+    # Hide login/register forms if user is already authenticated
+    if is_authenticated():
+        st.success("Already logged in.")
+        return
     
     # ===== DEFERRED ACTIONS: Process login/register/resume BEFORE any UI =====
     # This runs OUTSIDE form context, preventing pink flash / missing submit button
@@ -2520,19 +2525,18 @@ def render_login() -> None:
                     ss["login_error"] = "Login failed: incomplete session data."
                     st.rerun()
             elif resp:
-                # Failed login - show standard error message and defer password clear
-                # DO NOT call st.rerun() here - form submit already triggers a rerun
+                # Failed login - increment key version to clear password widget
+                ss["_login_key_version"] += 1
                 ss["login_error"] = "Incorrect email or password."
                 ss.pop("login_error_detail", None)  # Don't expose backend details to user
-                ss[CLEAR_LOGIN_PW_KEY] = True
-                # Email remains populated, password will be cleared on next rerun (before widgets)
+                st.rerun()
                 return
             else:
                 # Network error or timeout (resp is None)
+                ss["_login_key_version"] += 1
                 ss["login_error"] = "We couldn't sign you in. Please try again."
                 ss["login_error_detail"] = "Unable to connect to server. Please check your connection."
-                ss[CLEAR_LOGIN_PW_KEY] = True
-                # Email remains populated, password will be cleared on next rerun (before widgets)
+                st.rerun()
                 return
     
     if ss.get("_do_register"):
@@ -2640,46 +2644,6 @@ def render_login() -> None:
     
     # ===== END DEFERRED ACTIONS =====
     
-    # F) If authenticated, hide login UI - show logout/session controls only
-    if is_authenticated():
-        st.info("You are already logged in.")
-        
-        st.markdown("### Session Management")
-        
-        # Show current user info
-        current_user = ss.get("current_user")
-        if current_user and isinstance(current_user, dict):
-            email = current_user.get("email", "Unknown")
-            role = current_user.get("role", "member").title()
-            st.caption(f"**User:** {email}")
-            st.caption(f"**Role:** {role}")
-        
-        # Logout button
-        if st.button("🚪 Logout", key="logout_from_login_page", use_container_width=True):
-            # Call backend logout if session exists
-            session_id = ss.get("session_id")
-            refresh_token = ss.get("refresh_token")
-            
-            if session_id and refresh_token:
-                try:
-                    api_request(
-                        "POST",
-                        "/auth/logout",
-                        json={"session_id": session_id, "refresh_token": refresh_token},
-                        timeout=5
-                    )
-                except Exception:
-                    pass  # Continue logout even if backend call fails
-            
-            # Clear auth state using centralized helper
-            clear_auth()
-            
-            # Navigate to login page and rerun
-            go_to("Login")
-        
-        st.caption("Navigate using the sidebar to access other pages.")
-        return  # Stop rendering login forms
-    
     # ===== CRITICAL SECTION: ALL STATE MUTATIONS BEFORE FORMS =====
     # Clear register/resume fields if flagged (BEFORE any rendering)
     if ss.get("_clear_register_fields"):
@@ -2706,13 +2670,9 @@ def render_login() -> None:
             ss["login_error_detail"] = None
     # ===== END CRITICAL SECTION =====
     
-    # Show login error with dismiss button (BEFORE form for better UX)
+    # Show login error (stays until next attempt)
     if ss.get("login_error"):
         st.error(ss["login_error"])
-        if st.button("Dismiss", key="dismiss_login_error"):
-            ss["login_error"] = None
-            ss["login_error_detail"] = None
-            st.rerun()
         # Optional: show details in debug expander (not displayed by default)
         if IS_DEV and ss.get("login_error_detail"):
             with st.expander("Debug Details", expanded=False):
@@ -2722,8 +2682,15 @@ def render_login() -> None:
 
     # ✅ Login form - ONLY input widgets + submit button inside form
     with st.form("login_form"):
-        email = st.text_input("Email", key=LOGIN_EMAIL_KEY)
-        password = st.text_input("Password", type="password", key=LOGIN_PASSWORD_KEY)
+        email = st.text_input(
+            "Email",
+            key=f"login_email_{ss['_login_key_version']}"
+        )
+        password = st.text_input(
+            "Password",
+            type="password",
+            key=f"login_password_{ss['_login_key_version']}"
+        )
         submitted = st.form_submit_button("Login")
     
     # ✅ Process submission AFTER form (outside with block) - set flags only
