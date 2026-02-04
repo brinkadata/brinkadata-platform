@@ -2475,23 +2475,22 @@ def safe_delta(val1: Optional[float], val2: Optional[float], is_percentage: bool
 
 def render_login() -> None:
     ss = st.session_state
-    
+
     # Hide login/register forms if user is already authenticated
     if is_authenticated():
         st.success("Already logged in.")
         return
-    
-    # ===== DEFERRED ACTIONS: Process register/resume BEFORE any UI =====
-    # Login is now handled immediately in the form, but register/resume keep deferred pattern
-    
+
+    # -------------------------
+    # Deferred actions (register/resume) stay as-is
+    # -------------------------
     if ss.get("_do_register"):
         ss["_do_register"] = False
         reg_email = ss.get("_reg_email")
         reg_password = ss.get("_reg_password")
         reg_account_name = ss.get("_reg_account_name")
-        
+
         if reg_email and reg_password and reg_account_name:
-            # Call register endpoint
             resp = api_request(
                 "POST",
                 "/auth/register",
@@ -2499,7 +2498,6 @@ def render_login() -> None:
                 timeout=10
             )
             if resp and resp.status_code in (200, 201):
-                # Auto-login with same credentials
                 login_resp = api_request(
                     "POST", "/auth/login", json={"email": reg_email, "password": reg_password}, timeout=10
                 )
@@ -2509,23 +2507,18 @@ def render_login() -> None:
                     user = data.get("user", {})
                     session_id = data.get("session_id")
                     refresh_token = data.get("refresh_token")
-                    
+
                     if token and session_id and refresh_token:
-                        # Use centralized auth setter
                         set_auth(token, user, session_id, refresh_token)
-                        
-                        # Fetch and cache capabilities after successful auto-login
                         fetch_and_cache_capabilities()
-                        
+
                         if IS_DEV and 'track_event' in globals():
                             track_event(ss, "register_success", {"user": user.get("email", "unknown")})
                         set_debug_cause("register")
-                        
-                        # Set flag to clear register form fields on next run
+
                         ss["_clear_register_fields"] = True
-                        
-                        # Navigate after successful registration
                         request_nav("Analyzer")
+                        st.rerun()
                     else:
                         ss["register_error"] = "Registered. Please log in above."
                         st.rerun()
@@ -2539,13 +2532,12 @@ def render_login() -> None:
                 except Exception:
                     pass
                 st.rerun()
-    
+
     if ss.get("_do_resume"):
         ss["_do_resume"] = False
         resume_code = ss.get("_resume_code")
-        
+
         if resume_code:
-            # Call resume endpoint
             resp = api_request(
                 "POST",
                 "/auth/resume",
@@ -2558,23 +2550,18 @@ def render_login() -> None:
                 user = data.get("user", {})
                 session_id = data.get("session_id")
                 refresh_token = data.get("refresh_token")
-                
+
                 if token and session_id and refresh_token:
-                    # Use centralized auth setter
                     set_auth(token, user, session_id, refresh_token)
-                    
-                    # Fetch and cache capabilities after successful resume
                     fetch_and_cache_capabilities()
-                    
+
                     if IS_DEV and 'track_event' in globals():
                         track_event(ss, "resume_success", {"user": user.get("email", "unknown")})
                     set_debug_cause("resume")
-                    
-                    # Set flag to clear resume form field on next run
+
                     ss["_clear_resume_field"] = True
-                    
-                    # Navigate after successful resume
                     request_nav("Analyzer")
+                    st.rerun()
                 else:
                     ss["resume_error"] = "Resume failed: incomplete session data."
                     st.rerun()
@@ -2586,102 +2573,109 @@ def render_login() -> None:
                 except Exception:
                     pass
                 st.rerun()
-    
-    # ===== END DEFERRED ACTIONS =====
-    
-    # ===== CRITICAL SECTION: ALL STATE MUTATIONS BEFORE FORMS =====
-    # Clear register/resume fields if flagged (BEFORE any rendering)
+
+    # -------------------------
+    # CRITICAL SECTION: clear register/resume fields BEFORE rendering any widgets
+    # -------------------------
     if ss.get("_clear_register_fields"):
         ss.pop("register_email", None)
         ss.pop("register_password", None)
         ss.pop("register_account_name", None)
         ss.pop("_clear_register_fields", None)
-    
+
     if ss.get("_clear_resume_field"):
         ss.pop("resume_code_input", None)
         ss.pop("_clear_resume_field", None)
-    
-    # Clear password if flagged (BEFORE any rendering)
-    if ss.get(CLEAR_LOGIN_PW_KEY):
-        ss[LOGIN_PASSWORD_KEY] = ""
-        ss[CLEAR_LOGIN_PW_KEY] = False
-    # ===== END CRITICAL SECTION =====
-    
-    # Show login error (stays until next attempt)
-    if ss.get("login_error"):
-        st.error(ss.get("login_error_detail") or "Incorrect email or password.")
-    
+
+    # -------------------------
+    # Login state init (nonce-based password clearing)
+    # -------------------------
+    ss.setdefault("login_error_msg", "")
+    ss.setdefault("login_error_detail", "")
+    ss.setdefault("login_pw_nonce", 0)
+
+    # We will keep the EMAIL key stable and rotate the PASSWORD key only
+    # so email remains on failed login while password clears reliably.
+    pw_key = f"{LOGIN_PASSWORD_KEY}_{ss['login_pw_nonce']}"
+
+    # Show login error in a standard way
+    if ss.get("login_error_msg"):
+        st.error(ss.get("login_error_msg") or "Incorrect email or password.")
+
+        # Optional details (keep if you want)
+        if ss.get("login_error_detail"):
+            # Comment this out if you don't want any details shown in production
+            st.caption(ss.get("login_error_detail"))
+
     st.header("Login")
 
-    # ✅ Login form - widgets use consistent keys, handle submission immediately
+    # IMPORTANT: form must always include a submit button
     with st.form("login_form"):
-        email = st.text_input(
-            "Email",
-            key=LOGIN_EMAIL_KEY
-        )
-        password = st.text_input(
-            "Password",
-            type="password",
-            key=LOGIN_PASSWORD_KEY
-        )
+        email = st.text_input("Email", key=LOGIN_EMAIL_KEY)
+        password = st.text_input("Password", type="password", key=pw_key)
         submitted = st.form_submit_button("Login")
-    
-    # ✅ Process login submission immediately (no deferred action)
+
+    # Handle submit AFTER the form block
     if submitted:
+        # Clear previous error on new attempt (read-only UI, safe)
+        ss["login_error_msg"] = ""
+        ss["login_error_detail"] = ""
+
         if not email or not password:
-            st.error("Please enter email and password.")
+            ss["login_error_msg"] = "Please enter email and password."
+            # rotate password widget key so it clears
+            ss["login_pw_nonce"] += 1
+            st.rerun()
+
+        resp = api_request("POST", "/auth/login", json={"email": email, "password": password}, timeout=10)
+
+        if resp and resp.status_code == 200:
+            data = resp.json()
+            token = data.get("access_token")
+            user = data.get("user", {})
+            session_id = data.get("session_id")
+            refresh_token = data.get("refresh_token")
+
+            if token and session_id and refresh_token:
+                set_auth(token, user, session_id, refresh_token)
+                fetch_and_cache_capabilities()
+
+                if IS_DEV and 'track_event' in globals():
+                    track_event(ss, "login_success", {"user": user.get("email", "unknown")})
+                set_debug_cause("login")
+
+                # Clear any errors and route
+                ss["login_error_msg"] = ""
+                ss["login_error_detail"] = ""
+
+                target = ss.get(POST_LOGIN_NAV_KEY) or "Analyzer"
+                ss[POST_LOGIN_NAV_KEY] = None
+                go_to(target, rerun=True)
+                return
+
+            # Incomplete session data - treat as failure
+            ss["login_error_msg"] = "Login failed. Please try again."
+            ss["login_error_detail"] = "Login succeeded but session payload was incomplete."
+            ss["login_pw_nonce"] += 1
+            st.rerun()
+
+        elif resp:
+            # Wrong credentials
+            ss["login_error_msg"] = "Incorrect email or password."
+            ss["login_error_detail"] = ""
+            ss["login_pw_nonce"] += 1  # clears password only
+            st.rerun()
+
         else:
-            # Attempt login
-            resp = api_request("POST", "/auth/login", json={"email": email, "password": password}, timeout=10)
-            if resp and resp.status_code == 200:
-                data = resp.json()
-                token = data.get("access_token")
-                user = data.get("user", {})
-                session_id = data.get("session_id")
-                refresh_token = data.get("refresh_token")
-                
-                if token and session_id and refresh_token:
-                    # Use centralized auth setter
-                    set_auth(token, user, session_id, refresh_token)
-                    
-                    # Fetch and cache capabilities after successful login
-                    fetch_and_cache_capabilities()
-                    
-                    # Clear login error state and password on successful login
-                    ss["login_error"] = False
-                    ss["login_error_detail"] = ""
-                    ss[CLEAR_LOGIN_PW_KEY] = True
-                    
-                    if IS_DEV and 'track_event' in globals():
-                        track_event(ss, "login_success", {"user": user.get("email", "unknown")})
-                    set_debug_cause("login")
-                    
-                    # Determine target page and navigate
-                    target = ss.get(POST_LOGIN_NAV_KEY) or "Analyzer"
-                    ss[POST_LOGIN_NAV_KEY] = None  # Clear the redirect target
-                    go_to(target, rerun=True)
-                else:
-                    ss["login_error"] = True
-                    ss["login_error_detail"] = "Login failed: incomplete session data."
-                    ss[CLEAR_LOGIN_PW_KEY] = True
-                    st.rerun()
-            elif resp:
-                # Failed login - clear password, keep email
-                ss["login_error"] = True
-                ss["login_error_detail"] = "Incorrect email or password."
-                ss[CLEAR_LOGIN_PW_KEY] = True
-                st.rerun()
-            else:
-                # Network error or timeout (resp is None)
-                ss["login_error"] = True
-                ss["login_error_detail"] = "Unable to connect to server. Please check your connection."
-                ss[CLEAR_LOGIN_PW_KEY] = True
-                st.rerun()
+            # Network error / timeout
+            ss["login_error_msg"] = "Unable to connect to server. Please check your connection."
+            ss["login_error_detail"] = ""
+            ss["login_pw_nonce"] += 1
+            st.rerun()
 
     st.divider()
     st.subheader("Register New Account")
-    
-    # Show register error if present
+
     if ss.get("register_error"):
         st.error(ss["register_error"])
         if ss.get("register_error_detail"):
@@ -2689,32 +2683,26 @@ def render_login() -> None:
         ss["register_error"] = None
         ss["register_error_detail"] = None
 
-    # ✅ Register form - ONLY input widgets + submit button inside form
     with st.form("register_form"):
         reg_email = st.text_input("Email", key="register_email")
         reg_password = st.text_input("Password", type="password", key="register_password")
         reg_account_name = st.text_input("Account Name", key="register_account_name")
         reg_submitted = st.form_submit_button("Register")
-    
-    # ✅ Process submission AFTER form (outside with block) - set flags only
-    # DO NOT call st.rerun() - form submit already triggers a rerun
+
     if reg_submitted:
         if not reg_email or not reg_password or not reg_account_name:
             st.error("Please fill in all registration fields.")
         else:
-            # Store credentials and set flag to process on next run
             ss["_reg_email"] = reg_email
             ss["_reg_password"] = reg_password
             ss["_reg_account_name"] = reg_account_name
             ss["_do_register"] = True
-            # Form submit already triggers rerun - no manual rerun needed
 
     st.divider()
     st.subheader("Resume Session")
     st.caption("Already have a resume code? Enter it below to continue your session.")
     st.caption("⚠️ **Important**: Resume codes only work for browser refresh/rerun. If you logged out, the backend session is revoked and resume will fail. You must login again.")
-    
-    # Show resume error if present
+
     if ss.get("resume_error"):
         st.error(ss["resume_error"])
         if ss.get("resume_error_detail"):
@@ -2722,21 +2710,16 @@ def render_login() -> None:
         ss["resume_error"] = None
         ss["resume_error_detail"] = None
 
-    # ✅ Resume form - ONLY input widgets + submit button inside form
     with st.form("resume_form"):
         resume_code = st.text_input("Resume Code", key="resume_code_input", placeholder="XXXX-XXXX")
         resume_submitted = st.form_submit_button("Resume")
-    
-    # ✅ Process submission AFTER form (outside with block) - set flags only
-    # DO NOT call st.rerun() - form submit already triggers a rerun
+
     if resume_submitted:
         if not resume_code:
             st.error("Please enter a resume code.")
         else:
-            # Store code and set flag to process on next run
             ss["_resume_code"] = resume_code.strip()
             ss["_do_resume"] = True
-            # Form submit already triggers rerun - no manual rerun needed
 
 
 # ============================================================================
